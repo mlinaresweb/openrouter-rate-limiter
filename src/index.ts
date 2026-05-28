@@ -66,3 +66,23 @@ export type {
 export type {
   OpenRouterRateLimitStateStore,
 } from './core/domain/rate-limit-store.js';
+
+export {
+  classifyOpenRouterErrorCategory,
+  classifyOpenRouterResponse,
+  extractOpenRouterRequestModelFromBody,
+  getHeaderValue,
+  isOpenRouterRetryableStatus,
+  parseOpenRouterResponseJson,
+  parseRetryAfterFromHeaders,
+  parseRetryAfterHeader,
+} from './infrastructure/openrouter/openrouter-response-parser.js';
+
+export type {
+  OpenRouterErrorCategory,
+  OpenRouterExtractedRequestModel,
+  OpenRouterParsedError,
+  OpenRouterResponseCategory,
+  OpenRouterResponseClassification,
+  OpenRouterResponseHeadersInfo,
+} from './core/domain/openrouter-response.js';
