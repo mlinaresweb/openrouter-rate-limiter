@@ -86,3 +86,31 @@ export type {
   OpenRouterResponseClassification,
   OpenRouterResponseHeadersInfo,
 } from './core/domain/openrouter-response.js';
+
+export {
+  FileRateLimitStateStore,
+  createFileRateLimitStateStore,
+} from './infrastructure/storage/file-rate-limit-state-store.js';
+
+export {
+  MemoryRateLimitStateStore,
+  createMemoryRateLimitStateStore,
+} from './infrastructure/storage/memory-rate-limit-state-store.js';
+
+export {
+  cloneOpenRouterRateLimitStateSnapshot,
+  createEmptyGlobalState,
+  createEmptyModelState,
+  createEmptyOpenRouterRateLimitStateSnapshot,
+  createModelWindowState,
+  parseOpenRouterRateLimitStateSnapshot,
+  serializeOpenRouterRateLimitStateSnapshot,
+} from './infrastructure/storage/rate-limit-state-utils.js';
+
+export type {
+  FileRateLimitStateStoreOptions,
+} from './infrastructure/storage/file-rate-limit-state-store.js';
+
+export type {
+  MemoryRateLimitStateStoreOptions,
+} from './infrastructure/storage/memory-rate-limit-state-store.js';

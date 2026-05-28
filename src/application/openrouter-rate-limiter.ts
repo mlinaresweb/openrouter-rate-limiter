@@ -1,3 +1,6 @@
+import {
+  createMemoryRateLimitStateStore,
+} from '../infrastructure/storage/memory-rate-limit-state-store.js';
 import type {
   OpenRouterRateLimiterConfig,
   ResolvedOpenRouterRateLimiterConfig,
@@ -39,6 +42,12 @@ export class OpenRouterRateLimiter {
     return this.config.store.load();
   }
 
+  public async setState(
+    snapshot: OpenRouterRateLimitStateSnapshot,
+  ): Promise<void> {
+    await this.config.store.save(snapshot);
+  }
+
   public async clearState(): Promise<void> {
     await this.config.store.clear();
   }
@@ -76,7 +85,7 @@ function resolveOpenRouterRateLimiterConfig(
       retryOnTimeout: config.defaultPolicy?.retryOnTimeout ?? true,
     },
     models: config.models ?? {},
-    store: config.store ?? createNoopStateStore(),
+    store: config.store ?? createMemoryRateLimitStateStore(),
     hooks: config.hooks ?? {},
     inspectKeyBeforeRequest: config.inspectKeyBeforeRequest ?? true,
     loadModelsMetadata: config.loadModelsMetadata ?? true,
@@ -84,23 +93,5 @@ function resolveOpenRouterRateLimiterConfig(
     keyInfoTtlMs: config.keyInfoTtlMs ?? 1000 * 60,
     fetch: fetchImplementation,
     clockMode: config.clockMode ?? 'system',
-  };
-}
-
-function createNoopStateStore() {
-  return {
-    async load() {
-      return null;
-    },
-    async save() {
-      /**
-       * No-op store for ORL-1.
-       */
-    },
-    async clear() {
-      /**
-       * No-op store for ORL-1.
-       */
-    },
   };
 }
