@@ -49,6 +49,11 @@ export interface OpenRouterRateLimitPolicy {
   readonly respectRetryAfter: boolean;
 
   /**
+   * How often onCooldown is emitted while waiting.
+   */
+  readonly cooldownNotificationIntervalMs: number;
+
+  /**
    * If true, 503 is treated as transient provider pressure and can be retried.
    */
   readonly retryOnServiceUnavailable: boolean;
@@ -169,6 +174,7 @@ export interface ResolvedOpenRouterRateLimitPolicy {
   readonly maxDelayMs: number;
   readonly jitterRatio: number;
   readonly respectRetryAfter: boolean;
+  readonly cooldownNotificationIntervalMs: number;
   readonly retryOnServiceUnavailable: boolean;
   readonly retryOnBadGateway: boolean;
   readonly retryOnTimeout: boolean;
