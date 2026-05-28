@@ -146,3 +146,16 @@ export type {
   OpenRouterModelLookupResult,
   OpenRouterModelsListResult,
 } from './core/domain/openrouter-model-info.js';
+
+export {
+  createOpenRouterRateLimitedFetch,
+} from './application/rate-limited-fetch.js';
+
+export type {
+  CreateOpenRouterRateLimitedFetchOptions,
+  EstimateOpenRouterInputCharactersInput,
+  OpenRouterRateLimitedFetch,
+  OpenRouterRateLimitedFetchInit,
+  OpenRouterRateLimitedFetchInput,
+  OpenRouterRateLimitedFetchMetadata,
+} from './application/rate-limited-fetch.js';
