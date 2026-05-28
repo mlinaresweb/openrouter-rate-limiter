@@ -487,13 +487,95 @@ async function runNpm(params: {
   readonly cwd: string;
   readonly args: readonly string[];
 }): Promise<CommandResult> {
-  return runCommand({
+  const npmCliPath = await findNpmCliPath(params.cwd);
+
+  return runNode({
     cwd: params.cwd,
-    command: process.platform === 'win32' ? 'npm.cmd' : 'npm',
-    args: params.args,
+    args: [
+      npmCliPath,
+      ...params.args,
+    ],
   });
 }
+async function findNpmCliPath(startDirectory: string): Promise<string> {
+  const candidates = buildNpmCliPathCandidates(startDirectory);
 
+  for (const candidate of candidates) {
+    try {
+      await readFile(candidate, 'utf8');
+      return candidate;
+    } catch {
+      // Continue searching.
+    }
+  }
+
+  throw new Error(
+    [
+      'Cannot find npm CLI script.',
+      'Expected npm-cli.js from the current npm installation.',
+      'Try running this script through npm, or make sure npm is installed correctly.',
+    ].join(' '),
+  );
+}
+
+function buildNpmCliPathCandidates(startDirectory: string): readonly string[] {
+  const candidates: string[] = [];
+
+  const npmExecPath = process.env.npm_execpath;
+
+  if (
+    npmExecPath &&
+    npmExecPath.trim().length > 0 &&
+    !npmExecPath.toLowerCase().endsWith('.cmd') &&
+    !npmExecPath.toLowerCase().endsWith('.ps1')
+  ) {
+    candidates.push(npmExecPath);
+  }
+
+  candidates.push(
+    path.join(
+      path.dirname(process.execPath),
+      'node_modules',
+      'npm',
+      'bin',
+      'npm-cli.js',
+    ),
+    path.join(
+      startDirectory,
+      'node_modules',
+      'npm',
+      'bin',
+      'npm-cli.js',
+    ),
+    path.join(
+      startDirectory,
+      '..',
+      '..',
+      'node_modules',
+      'npm',
+      'bin',
+      'npm-cli.js',
+    ),
+    path.join(
+      process.cwd(),
+      'node_modules',
+      'npm',
+      'bin',
+      'npm-cli.js',
+    ),
+    path.join(
+      process.cwd(),
+      '..',
+      '..',
+      'node_modules',
+      'npm',
+      'bin',
+      'npm-cli.js',
+    ),
+  );
+
+  return [...new Set(candidates.map((candidate) => path.resolve(candidate)))];
+}
 async function runNode(params: {
   readonly cwd: string;
   readonly args: readonly string[];
