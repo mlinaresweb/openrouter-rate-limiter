@@ -39,21 +39,46 @@ export interface EstimateOpenRouterInputCharactersInput {
 
 export interface CreateOpenRouterRateLimitedFetchOptions {
   readonly limiter: OpenRouterRateLimiter;
+
+  /**
+   * Custom fetch implementation.
+   *
+   * Defaults to limiter.getConfig().fetch.
+   */
   readonly fetch?: typeof fetch;
+
+  /**
+   * Used when neither init.openRouter.model nor request body model exists.
+   */
   readonly defaultModel?: string;
+
+  /**
+   * Default operation name for observability hooks.
+   */
   readonly defaultOperation?: string;
 
   /**
    * Optional default headers added to every request.
    *
-   * Existing request headers override these.
+   * Request headers override these.
    */
   readonly defaultHeaders?: HeadersInit;
 
+  /**
+   * Custom input size estimator.
+   *
+   * If omitted, the wrapper uses request body text length when available.
+   */
   readonly estimateInputCharacters?: (
     input: EstimateOpenRouterInputCharactersInput,
   ) => number | Promise<number>;
 
+  /**
+   * If true, the wrapper tries to read Request body from input.clone()
+   * when init.body is not provided.
+   *
+   * Defaults to true.
+   */
   readonly inspectRequestBody?: boolean;
 }
 
@@ -104,15 +129,13 @@ export function withOpenRouterMetadata(
   };
 }
 
-export function createOpenRouterJsonHeaders(
-  params: {
-    readonly apiKey: string;
-    readonly appName?: string | null;
-    readonly referer?: string | null;
-    readonly userAgent?: string | null;
-    readonly extraHeaders?: HeadersInit;
-  },
-): Headers {
+export function createOpenRouterJsonHeaders(params: {
+  readonly apiKey: string;
+  readonly appName?: string | null;
+  readonly referer?: string | null;
+  readonly userAgent?: string | null;
+  readonly extraHeaders?: HeadersInit;
+}): Headers {
   const headers = new Headers();
 
   headers.set('Authorization', `Bearer ${params.apiKey}`);
@@ -131,13 +154,10 @@ export function createOpenRouterJsonHeaders(
     headers.set('User-Agent', params.userAgent);
   }
 
-  if (params.extraHeaders) {
-    const extra = new Headers(params.extraHeaders);
-
-    for (const [key, value] of extra.entries()) {
-      headers.set(key, value);
-    }
-  }
+  copyHeaders({
+    target: headers,
+    source: params.extraHeaders,
+  });
 
   return headers;
 }
@@ -267,17 +287,48 @@ function mergeHeaders(params: {
     return undefined;
   }
 
-  const headers = new Headers(params.defaultHeaders);
+  const headers = new Headers();
 
-  if (params.requestHeaders !== undefined) {
-    const requestHeaders = new Headers(params.requestHeaders);
+  copyHeaders({
+    target: headers,
+    source: params.defaultHeaders,
+  });
 
-    for (const [key, value] of requestHeaders.entries()) {
-      headers.set(key, value);
-    }
-  }
+  copyHeaders({
+    target: headers,
+    source: params.requestHeaders,
+  });
 
   return headers;
+}
+
+function copyHeaders(params: {
+  readonly target: Headers;
+  readonly source: HeadersInit | undefined;
+}): void {
+  if (params.source === undefined) {
+    return;
+  }
+
+  if (params.source instanceof Headers) {
+    params.source.forEach((value, key) => {
+      params.target.set(key, value);
+    });
+
+    return;
+  }
+
+  if (Array.isArray(params.source)) {
+    for (const [key, value] of params.source) {
+      params.target.set(key, value);
+    }
+
+    return;
+  }
+
+  for (const [key, value] of Object.entries(params.source)) {
+    params.target.set(key, value);
+  }
 }
 
 async function estimateInputCharacters(params: {
