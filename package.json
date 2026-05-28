@@ -1,0 +1,71 @@
+{
+  "name": "openrouter-rate-limiter",
+  "version": "0.1.0",
+  "description": "Production-ready OpenRouter rate limiter for Node.js, CLIs and automation workflows.",
+  "type": "module",
+  "license": "MIT",
+  "author": "mlinaresweb",
+  "homepage": "https://github.com/mlinaresweb/openrouter-rate-limiter#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mlinaresweb/openrouter-rate-limiter.git"
+  },
+  "bugs": {
+    "url": "https://github.com/mlinaresweb/openrouter-rate-limiter/issues"
+  },
+  "keywords": [
+    "openrouter",
+    "rate-limit",
+    "rate-limiter",
+    "ai",
+    "llm",
+    "retry",
+    "retry-after",
+    "backoff",
+    "typescript",
+    "node",
+    "cli",
+    "automation"
+  ],
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "NOTICE.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
+    "build": "tsup",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "pack:dry": "npm run clean && npm run check && npm run test && npm run build && npm pack --dry-run",
+    "pack:local": "npm run clean && npm run check && npm run test && npm run build && npm pack",
+    "release:check": "npm run clean && npm run check && npm run test && npm run build && npm pack --dry-run",
+    "publish:dry": "npm run release:check && npm publish --dry-run --access public",
+    "publish:public": "npm run release:check && npm publish --access public",
+    "prepublishOnly": "npm run clean && npm run check && npm run test && npm run build"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^22.19.18",
+    "tsup": "^8.0.0",
+    "typescript": "^5.0.0",
+    "vitest": "^4.1.5"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
