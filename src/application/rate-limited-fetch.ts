@@ -16,9 +16,9 @@ export interface OpenRouterRateLimitedFetchMetadata {
 
 export interface OpenRouterRateLimitedFetchInit extends RequestInit {
   /**
-   * Metadata used only by openrouter-rate-limiter.
+   * Metadata consumed only by openrouter-rate-limiter.
    *
-   * This property is removed before calling the real fetch implementation.
+   * It is removed before calling the real fetch implementation.
    */
   readonly openRouter?: OpenRouterRateLimitedFetchMetadata;
 }
@@ -39,39 +39,21 @@ export interface EstimateOpenRouterInputCharactersInput {
 
 export interface CreateOpenRouterRateLimitedFetchOptions {
   readonly limiter: OpenRouterRateLimiter;
-
-  /**
-   * Custom fetch implementation.
-   *
-   * Defaults to limiter.getConfig().fetch.
-   */
   readonly fetch?: typeof fetch;
-
-  /**
-   * Used when neither init.openRouter.model nor request body model exists.
-   */
   readonly defaultModel?: string;
-
-  /**
-   * Default operation name for observability hooks.
-   */
   readonly defaultOperation?: string;
 
   /**
-   * Custom input size estimator.
+   * Optional default headers added to every request.
    *
-   * If omitted, the wrapper uses the request body text length when available.
+   * Existing request headers override these.
    */
+  readonly defaultHeaders?: HeadersInit;
+
   readonly estimateInputCharacters?: (
     input: EstimateOpenRouterInputCharactersInput,
   ) => number | Promise<number>;
 
-  /**
-   * If true, the wrapper tries to read Request body from input.clone()
-   * when init.body is not provided.
-   *
-   * Defaults to true.
-   */
   readonly inspectRequestBody?: boolean;
 }
 
@@ -112,12 +94,64 @@ export function createOpenRouterRateLimitedFetch(
   };
 }
 
+export function withOpenRouterMetadata(
+  init: RequestInit | undefined,
+  metadata: OpenRouterRateLimitedFetchMetadata,
+): OpenRouterRateLimitedFetchInit {
+  return {
+    ...(init ?? {}),
+    openRouter: metadata,
+  };
+}
+
+export function createOpenRouterJsonHeaders(
+  params: {
+    readonly apiKey: string;
+    readonly appName?: string | null;
+    readonly referer?: string | null;
+    readonly userAgent?: string | null;
+    readonly extraHeaders?: HeadersInit;
+  },
+): Headers {
+  const headers = new Headers();
+
+  headers.set('Authorization', `Bearer ${params.apiKey}`);
+  headers.set('Content-Type', 'application/json');
+  headers.set('Accept', 'application/json');
+
+  if (params.appName) {
+    headers.set('X-Title', params.appName);
+  }
+
+  if (params.referer) {
+    headers.set('HTTP-Referer', params.referer);
+  }
+
+  if (params.userAgent) {
+    headers.set('User-Agent', params.userAgent);
+  }
+
+  if (params.extraHeaders) {
+    const extra = new Headers(params.extraHeaders);
+
+    for (const [key, value] of extra.entries()) {
+      headers.set(key, value);
+    }
+  }
+
+  return headers;
+}
+
 async function buildFetchMetadata(params: {
   readonly input: OpenRouterRateLimitedFetchInput;
   readonly init: OpenRouterRateLimitedFetchInit | undefined;
   readonly options: CreateOpenRouterRateLimitedFetchOptions;
 }): Promise<BuiltFetchMetadata> {
-  const fetchInit = stripOpenRouterMetadata(params.init);
+  const fetchInit = stripOpenRouterMetadata({
+    init: params.init,
+    defaultHeaders: params.options.defaultHeaders,
+  });
+
   const bodyText = await readRequestBodyTextForInspection({
     input: params.input,
     init: params.init,
@@ -198,19 +232,52 @@ async function buildFetchMetadata(params: {
   };
 }
 
-function stripOpenRouterMetadata(
-  init: OpenRouterRateLimitedFetchInit | undefined,
-): RequestInit | undefined {
-  if (init === undefined) {
+function stripOpenRouterMetadata(params: {
+  readonly init: OpenRouterRateLimitedFetchInit | undefined;
+  readonly defaultHeaders: HeadersInit | undefined;
+}): RequestInit | undefined {
+  if (params.init === undefined && params.defaultHeaders === undefined) {
     return undefined;
   }
 
   const {
     openRouter: _openRouter,
-    ...fetchInit
-  } = init;
+    headers: requestHeaders,
+    ...rest
+  } = params.init ?? {};
 
-  return fetchInit;
+  const mergedHeaders = mergeHeaders({
+    defaultHeaders: params.defaultHeaders,
+    requestHeaders,
+  });
+
+  return {
+    ...rest,
+    ...(mergedHeaders !== undefined
+      ? { headers: mergedHeaders }
+      : {}),
+  };
+}
+
+function mergeHeaders(params: {
+  readonly defaultHeaders: HeadersInit | undefined;
+  readonly requestHeaders: HeadersInit | undefined;
+}): Headers | undefined {
+  if (params.defaultHeaders === undefined && params.requestHeaders === undefined) {
+    return undefined;
+  }
+
+  const headers = new Headers(params.defaultHeaders);
+
+  if (params.requestHeaders !== undefined) {
+    const requestHeaders = new Headers(params.requestHeaders);
+
+    for (const [key, value] of requestHeaders.entries()) {
+      headers.set(key, value);
+    }
+  }
+
+  return headers;
 }
 
 async function estimateInputCharacters(params: {
@@ -287,12 +354,6 @@ async function bodyInitToText(body: BodyInit): Promise<string | null> {
     return new TextDecoder().decode(body);
   }
 
-  /**
-   * FormData and ReadableStream are intentionally not consumed here.
-   *
-   * - FormData is not expected for OpenRouter JSON requests.
-   * - ReadableStream would be consumed and break the actual fetch call.
-   */
   return null;
 }
 

@@ -28,6 +28,21 @@ import {
 } from '../infrastructure/storage/rate-limit-state-utils.js';
 import { sleepMs } from '../infrastructure/time/sleep.js';
 import { clampNumber } from '../shared/date-utils.js';
+import type {
+  OpenRouterKeyInfoResult,
+} from '../core/domain/openrouter-key-info.js';
+import type {
+  OpenRouterModelLookupResult,
+  OpenRouterModelsListResult,
+} from '../core/domain/openrouter-model-info.js';
+import {
+  OpenRouterKeyClient,
+} from '../infrastructure/openrouter/openrouter-key-client.js';
+import {
+  OpenRouterModelsClient,
+  type ListOpenRouterModelsOptions,
+} from '../infrastructure/openrouter/openrouter-models-client.js';
+
 
 interface ModelQueueState {
   activeRequests: number;
@@ -56,6 +71,10 @@ interface MutableOpenRouterRateLimitStateSnapshot {
 export class OpenRouterRateLimiter {
   private readonly config: ResolvedOpenRouterRateLimiterConfig;
   private readonly queues = new Map<string, ModelQueueState>();
+    private keyClient: OpenRouterKeyClient | null = null;
+    private modelsClient: OpenRouterModelsClient | null = null;
+    private cachedKeyInfo: OpenRouterKeyInfoResult | null = null;
+    private readonly cachedModelsByKey = new Map<string, OpenRouterModelsListResult>();
 
   public constructor(config: OpenRouterRateLimiterConfig) {
     this.config = resolveOpenRouterRateLimiterConfig(config);
@@ -240,6 +259,98 @@ export class OpenRouterRateLimiter {
   public async clearState(): Promise<void> {
     await this.config.store.clear();
   }
+
+  public async getCurrentKeyInfo(
+  options: {
+    readonly forceRefresh?: boolean;
+  } = {},
+): Promise<OpenRouterKeyInfoResult> {
+  const now = Date.now();
+
+  if (
+    !options.forceRefresh &&
+    this.cachedKeyInfo &&
+    now - this.cachedKeyInfo.checkedAtMs <= this.config.keyInfoTtlMs
+  ) {
+    return this.cachedKeyInfo;
+  }
+
+  const result = await this.getKeyClient().getCurrentKeyInfo();
+
+  this.cachedKeyInfo = result;
+
+  await this.updateGlobalState((global) => {
+    return {
+      ...global,
+      lastKeyInfoCheckedAtMs: result.checkedAtMs,
+      updatedAtMs: Date.now(),
+    };
+  });
+
+  await this.config.hooks.onEvent?.({
+    type: 'key_info',
+    keyInfo: result.keyInfo,
+  });
+
+  return result;
+}
+
+public async listModels(
+  options: ListOpenRouterModelsOptions & {
+    readonly forceRefresh?: boolean;
+  } = {},
+): Promise<OpenRouterModelsListResult> {
+  const cacheKey = buildModelsCacheKey(options);
+  const now = Date.now();
+  const cached = this.cachedModelsByKey.get(cacheKey);
+
+  if (
+    !options.forceRefresh &&
+    cached &&
+    now - cached.loadedAtMs <= this.config.modelsMetadataTtlMs
+  ) {
+    return cached;
+  }
+
+  const result = await this.getModelsClient().listModels({
+    ...(options.category !== undefined ? { category: options.category } : {}),
+    ...(options.supportedParameters !== undefined
+      ? { supportedParameters: options.supportedParameters }
+      : {}),
+    ...(options.modality !== undefined ? { modality: options.modality } : {}),
+  });
+
+  this.cachedModelsByKey.set(cacheKey, result);
+
+  await this.updateGlobalState((global) => {
+    return {
+      ...global,
+      lastModelsMetadataCheckedAtMs: result.loadedAtMs,
+      updatedAtMs: Date.now(),
+    };
+  });
+
+  await this.config.hooks.onEvent?.({
+    type: 'models_loaded',
+    models: result.models,
+  });
+
+  return result;
+}
+
+public async getModelInfo(
+  modelId: string,
+  options: ListOpenRouterModelsOptions & {
+    readonly forceRefresh?: boolean;
+  } = {},
+): Promise<OpenRouterModelLookupResult> {
+  const loaded = await this.listModels(options);
+
+  return {
+    model: loaded.models.find((model) => model.id === modelId) ?? null,
+    loadedAtMs: loaded.loadedAtMs,
+  };
+}
 
   private async waitForPreflightAvailability(params: {
     readonly model: string;
@@ -769,6 +880,51 @@ export class OpenRouterRateLimiter {
     await this.config.hooks.onRetry?.(event);
     await this.config.hooks.onEvent?.(event);
   }
+  private getKeyClient(): OpenRouterKeyClient {
+  if (this.keyClient) {
+    return this.keyClient;
+  }
+
+  this.keyClient = new OpenRouterKeyClient({
+    apiKey: this.config.apiKey,
+    baseUrl: this.config.baseUrl,
+    fetch: this.config.fetch,
+    ...(this.config.appName !== null ? { appName: this.config.appName } : {}),
+    ...(this.config.referer !== null ? { referer: this.config.referer } : {}),
+    ...(this.config.userAgent !== null ? { userAgent: this.config.userAgent } : {}),
+  });
+
+  return this.keyClient;
+}
+
+private getModelsClient(): OpenRouterModelsClient {
+  if (this.modelsClient) {
+    return this.modelsClient;
+  }
+
+  this.modelsClient = new OpenRouterModelsClient({
+    apiKey: this.config.apiKey,
+    baseUrl: this.config.baseUrl,
+    fetch: this.config.fetch,
+    ...(this.config.appName !== null ? { appName: this.config.appName } : {}),
+    ...(this.config.referer !== null ? { referer: this.config.referer } : {}),
+    ...(this.config.userAgent !== null ? { userAgent: this.config.userAgent } : {}),
+  });
+
+  return this.modelsClient;
+}
+
+private async updateGlobalState(
+  updater: (
+    global: OpenRouterGlobalRateLimitState,
+  ) => OpenRouterGlobalRateLimitState,
+): Promise<void> {
+  const snapshot = await this.loadOrCreateMutableState();
+
+  snapshot.global = updater(snapshot.global);
+
+  await this.config.store.save(snapshot);
+}
 }
 
 function resolveOpenRouterRateLimiterConfig(
@@ -807,13 +963,38 @@ function resolveOpenRouterRateLimiterConfig(
     models: config.models ?? {},
     store: config.store ?? createMemoryRateLimitStateStore(),
     hooks: config.hooks ?? {},
-    inspectKeyBeforeRequest: config.inspectKeyBeforeRequest ?? true,
-    loadModelsMetadata: config.loadModelsMetadata ?? true,
+    inspectKeyBeforeRequest: config.inspectKeyBeforeRequest ?? false,
+    loadModelsMetadata: config.loadModelsMetadata ?? false,
     modelsMetadataTtlMs: config.modelsMetadataTtlMs ?? 1000 * 60 * 60,
     keyInfoTtlMs: config.keyInfoTtlMs ?? 1000 * 60,
     fetch: fetchImplementation,
     clockMode: config.clockMode ?? 'system',
+    appName: normalizeOptionalString(config.appName),
+referer: normalizeOptionalString(config.referer),
+userAgent: normalizeOptionalString(config.userAgent),
   };
+}
+
+function normalizeOptionalString(value: string | undefined): string | null {
+  if (value === undefined) {
+    return null;
+  }
+
+  const trimmed = value.trim();
+
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function buildModelsCacheKey(
+  options: ListOpenRouterModelsOptions & {
+    readonly forceRefresh?: boolean;
+  },
+): string {
+  return JSON.stringify({
+    category: options.category ?? null,
+    modality: options.modality ?? null,
+    supportedParameters: options.supportedParameters ?? [],
+  });
 }
 
 function resolveRequestModel(params: {

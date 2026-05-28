@@ -148,8 +148,23 @@ export type {
 } from './core/domain/openrouter-model-info.js';
 
 export {
+  createOpenRouterRateLimitedClient,
+} from './application/openrouter-rate-limited-client.js';
+
+export {
+  createOpenRouterJsonHeaders,
   createOpenRouterRateLimitedFetch,
+  withOpenRouterMetadata,
 } from './application/rate-limited-fetch.js';
+
+export type {
+  OpenRouterChatCompletionsOptions,
+  OpenRouterJsonObject,
+  OpenRouterJsonRequestOptions,
+  OpenRouterRateLimitedClient,
+  OpenRouterRateLimitedClientOptions,
+  OpenRouterRequestJsonOptions,
+} from './application/openrouter-rate-limited-client.js';
 
 export type {
   CreateOpenRouterRateLimitedFetchOptions,
