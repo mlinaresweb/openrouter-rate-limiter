@@ -32,6 +32,11 @@ export interface OpenRouterModelTopProvider {
   readonly raw?: Readonly<Record<string, unknown>>;
 }
 
+export interface OpenRouterModelLinks {
+  readonly details?: string;
+  readonly raw?: Readonly<Record<string, unknown>>;
+}
+
 export interface OpenRouterModelInfo {
   readonly id: string;
   readonly name?: string;
@@ -43,5 +48,17 @@ export interface OpenRouterModelInfo {
   readonly topProvider?: OpenRouterModelTopProvider;
   readonly perRequestLimits?: OpenRouterModelPerRequestLimits | null;
   readonly supportedParameters?: readonly string[];
+  readonly defaultParameters?: Readonly<Record<string, unknown>> | null;
+  readonly links?: OpenRouterModelLinks;
   readonly raw: Readonly<Record<string, unknown>>;
+}
+
+export interface OpenRouterModelsListResult {
+  readonly models: readonly OpenRouterModelInfo[];
+  readonly loadedAtMs: number;
+}
+
+export interface OpenRouterModelLookupResult {
+  readonly model: OpenRouterModelInfo | null;
+  readonly loadedAtMs: number;
 }

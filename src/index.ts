@@ -114,3 +114,35 @@ export type {
 export type {
   MemoryRateLimitStateStoreOptions,
 } from './infrastructure/storage/memory-rate-limit-state-store.js';
+
+export {
+  OpenRouterKeyClient,
+  parseOpenRouterKeyInfo,
+  parseOpenRouterKeyInfoResponse,
+} from './infrastructure/openrouter/openrouter-key-client.js';
+
+export {
+  OpenRouterModelsClient,
+  parseOpenRouterModelInfoOrNull,
+  parseOpenRouterModelsResponse,
+} from './infrastructure/openrouter/openrouter-models-client.js';
+
+export type {
+  OpenRouterKeyClientOptions,
+} from './infrastructure/openrouter/openrouter-key-client.js';
+
+export type {
+  ListOpenRouterModelsOptions,
+  OpenRouterModelsClientOptions,
+} from './infrastructure/openrouter/openrouter-models-client.js';
+
+export type {
+  OpenRouterKeyInfoResult,
+  OpenRouterKeyLimitReset,
+} from './core/domain/openrouter-key-info.js';
+
+export type {
+  OpenRouterModelLinks,
+  OpenRouterModelLookupResult,
+  OpenRouterModelsListResult,
+} from './core/domain/openrouter-model-info.js';
