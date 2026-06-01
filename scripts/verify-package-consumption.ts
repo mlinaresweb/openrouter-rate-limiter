@@ -1,7 +1,16 @@
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import {
+  access,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  writeFile,
+} from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
@@ -22,8 +31,13 @@ const PACKAGE_NAME = 'openrouter-rate-limiter';
 
 async function main(): Promise<void> {
   const packageRoot = process.cwd();
+
   const consumerRoot = await mkdtemp(
     path.join(os.tmpdir(), 'openrouter-rate-limiter-consumer-'),
+  );
+
+  const packRoot = await mkdtemp(
+    path.join(os.tmpdir(), 'openrouter-rate-limiter-pack-'),
   );
 
   let tarballPath: string | null = null;
@@ -32,6 +46,7 @@ async function main(): Promise<void> {
     logTitle('Verifying package as an external consumer');
     logInfo('Package root: ' + packageRoot);
     logInfo('Consumer temp project: ' + consumerRoot);
+    logInfo('Package temp directory: ' + packRoot);
 
     await runStep('Cleaning package dist', async () => {
       await runNpm({
@@ -61,33 +76,20 @@ async function main(): Promise<void> {
       });
     });
 
-await runStep('Creating temp consumer project', async () => {
-  await createConsumerProject(consumerRoot);
-});
+    await runStep('Creating temp consumer project', async () => {
+      await createConsumerProject(consumerRoot);
+    });
 
-tarballPath = await runStep('Packing package', async () => {
-  const result = await runNpm({
-    cwd: packageRoot,
-    args: ['pack', '--json', '--pack-destination', consumerRoot],
-  });
+    tarballPath = await runStep('Packing package', async () => {
+      const resolvedTarballPath = await packPackageForConsumer({
+        packageRoot,
+        packRoot,
+      });
 
-  const packed = parseNpmPackOutput(result.stdout);
-  const first = packed[0];
+      logInfo('Package tarball: ' + resolvedTarballPath);
 
-  if (!first) {
-    throw new Error('npm pack did not return any package output item.');
-  }
-
-  const resolvedTarballPath = resolvePackedTarballPath({
-    packageRoot,
-    packDestination: consumerRoot,
-    filename: first.filename,
-  });
-
-  logInfo('Package tarball: ' + resolvedTarballPath);
-
-  return resolvedTarballPath;
-});
+      return resolvedTarballPath;
+    });
 
     await runStep('Installing tarball in temp consumer project', async () => {
       if (tarballPath === null) {
@@ -96,7 +98,12 @@ tarballPath = await runStep('Packing package', async () => {
 
       await runNpm({
         cwd: consumerRoot,
-        args: ['install', tarballPath, '--no-audit', '--ignore-scripts'],
+        args: [
+          'install',
+          pathToFileURL(tarballPath).href,
+          '--no-audit',
+          '--ignore-scripts',
+        ],
       });
     });
 
@@ -128,7 +135,12 @@ tarballPath = await runStep('Packing package', async () => {
       force: true,
     });
 
-    if (tarballPath !== null) {
+    await rm(packRoot, {
+      recursive: true,
+      force: true,
+    });
+
+    if (tarballPath !== null && !isInsideDirectory(tarballPath, packRoot)) {
       await rm(tarballPath, {
         force: true,
       });
@@ -494,6 +506,85 @@ function buildConsumerCommonJsRuntimeFixture(): string {
   ].join('\n');
 }
 
+async function packPackageForConsumer(params: {
+  readonly packageRoot: string;
+  readonly packRoot: string;
+}): Promise<string> {
+  const jsonPackResult = await runNpm({
+    cwd: params.packageRoot,
+    args: [
+      'pack',
+      '--json',
+      '--pack-destination',
+      params.packRoot,
+      '--dry-run=false',
+    ],
+  });
+
+  const packed = parseNpmPackOutput(jsonPackResult.stdout);
+  const first = packed[0];
+
+  if (!first) {
+    throw new Error('npm pack did not return any package output item.');
+  }
+
+  const jsonPackTarball = await findExistingPackedTarballPath({
+    packageRoot: params.packageRoot,
+    packRoot: params.packRoot,
+    filename: first.filename,
+  });
+
+  if (jsonPackTarball !== null) {
+    return jsonPackTarball;
+  }
+
+  logInfo(
+    [
+      'npm pack --json reported "' + first.filename + '" but no tarball was found.',
+      'Retrying with plain npm pack...',
+    ].join('\n'),
+  );
+
+  const plainPackResult = await runNpm({
+    cwd: params.packageRoot,
+    args: [
+      'pack',
+      '--pack-destination',
+      params.packRoot,
+      '--dry-run=false',
+    ],
+  });
+
+  const plainFilename = parsePlainNpmPackFilename(plainPackResult.stdout);
+  const fallbackFilename = plainFilename ?? first.filename;
+
+  const plainPackTarball = await findExistingPackedTarballPath({
+    packageRoot: params.packageRoot,
+    packRoot: params.packRoot,
+    filename: fallbackFilename,
+  });
+
+  if (plainPackTarball !== null) {
+    return plainPackTarball;
+  }
+
+  const discoveredTarball = await findSingleTarballInDirectory(params.packRoot);
+
+  if (discoveredTarball !== null) {
+    return discoveredTarball;
+  }
+
+  throw new Error(
+    [
+      'npm pack completed, but the tarball file was not found.',
+      'JSON pack reported filename: ' + first.filename,
+      'Plain pack reported filename: ' + (plainFilename ?? '<none>'),
+      'Package root: ' + params.packageRoot,
+      'Pack root: ' + params.packRoot,
+    ].join('\n'),
+  );
+}
+
 async function runTypeScriptConsumerTypecheck(params: {
   readonly packageRoot: string;
   readonly consumerRoot: string;
@@ -536,33 +627,48 @@ async function findTypeScriptCompiler(startDirectory: string): Promise<string> {
   );
 }
 
-function resolvePackedTarballPath(params: {
+async function findExistingPackedTarballPath(params: {
   readonly packageRoot: string;
-  readonly packDestination: string;
+  readonly packRoot: string;
   readonly filename: string;
-}): string {
-  if (path.isAbsolute(params.filename)) {
-    return params.filename;
+}): Promise<string | null> {
+  const candidates = path.isAbsolute(params.filename)
+    ? [params.filename]
+    : [
+        path.resolve(params.packRoot, params.filename),
+        path.resolve(params.packageRoot, params.filename),
+      ];
+
+  for (const candidate of candidates) {
+    try {
+      await access(candidate);
+      return candidate;
+    } catch {
+      // Try next candidate.
+    }
   }
 
-  const fromPackDestination = path.resolve(
-    params.packDestination,
-    params.filename,
-  );
+  return null;
+}
 
-  const fromPackageRoot = path.resolve(
-    params.packageRoot,
-    params.filename,
-  );
+async function findSingleTarballInDirectory(directory: string): Promise<string | null> {
+  let entries: readonly string[];
 
-  /*
-   * npm normally writes the tarball inside --pack-destination, but older npm
-   * versions may report only a relative filename. Prefer the explicit temp
-   * destination because that is the path we install from.
-   */
-  return fromPackDestination.includes(path.resolve(params.packDestination))
-    ? fromPackDestination
-    : fromPackageRoot;
+  try {
+    entries = await readdir(directory);
+  } catch {
+    return null;
+  }
+
+  const tarballs = entries
+    .filter((entry) => entry.endsWith('.tgz'))
+    .map((entry) => path.resolve(directory, entry));
+
+  if (tarballs.length === 1) {
+    return tarballs[0] ?? null;
+  }
+
+  return null;
 }
 
 function parseNpmPackOutput(stdout: string): readonly NpmPackOutputItem[] {
@@ -605,6 +711,19 @@ function parseNpmPackOutputItem(value: unknown): NpmPackOutputItem {
     ...(name !== null ? { name } : {}),
     ...(version !== null ? { version } : {}),
   };
+}
+
+function parsePlainNpmPackFilename(stdout: string): string | null {
+  const lines = stdout
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+
+  const candidate = [...lines]
+    .reverse()
+    .find((line) => line.endsWith('.tgz'));
+
+  return candidate ?? null;
 }
 
 async function runStep<T>(
@@ -739,6 +858,7 @@ async function runCommand(params: {
   try {
     const result = await execFileAsync(params.command, [...params.args], {
       cwd: params.cwd,
+      env: buildCommandEnv(),
       windowsHide: true,
       maxBuffer: 1024 * 1024 * 20,
       encoding: 'utf8',
@@ -774,6 +894,21 @@ async function runCommand(params: {
   }
 }
 
+function buildCommandEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+  };
+
+  delete env.npm_config_dry_run;
+  delete env.npm_config_dryrun;
+  delete env.NPM_CONFIG_DRY_RUN;
+  delete env.NPM_CONFIG_DRYRUN;
+
+  env.npm_config_dry_run = 'false';
+
+  return env;
+}
+
 function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -794,6 +929,18 @@ function isExecError(value: unknown): value is {
   readonly stderr?: unknown;
 } {
   return typeof value === 'object' && value !== null;
+}
+
+function isInsideDirectory(filePath: string, directoryPath: string): boolean {
+  const relative = path.relative(
+    path.resolve(directoryPath),
+    path.resolve(filePath),
+  );
+
+  return (
+    relative.length === 0 ||
+    (!relative.startsWith('..') && !path.isAbsolute(relative))
+  );
 }
 
 function logTitle(message: string): void {
