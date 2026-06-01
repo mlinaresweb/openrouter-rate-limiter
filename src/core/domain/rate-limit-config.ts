@@ -23,6 +23,33 @@ export interface OpenRouterRateLimitPolicy {
   readonly retryOnTimeout: boolean;
 }
 
+export interface OpenRouterGlobalRateLimitPolicy {
+  /**
+   * Minimum interval between any two OpenRouter requests.
+   */
+  readonly minIntervalMs?: number;
+
+  /**
+   * Maximum concurrent OpenRouter requests across all models.
+   */
+  readonly maxConcurrentRequests?: number;
+
+  /**
+   * Optional global request budget per rolling window.
+   */
+  readonly requestsPerWindow?: number;
+
+  /**
+   * Rolling window size for global requestsPerWindow/inputCharactersPerWindow.
+   */
+  readonly windowMs?: number;
+
+  /**
+   * Optional global input character budget per rolling window.
+   */
+  readonly inputCharactersPerWindow?: number;
+}
+
 export interface OpenRouterModelRateLimitPolicy {
   readonly minIntervalMs?: number;
   readonly maxConcurrentRequests?: number;
@@ -38,23 +65,27 @@ export interface OpenRouterRateLimiterConfig {
   readonly defaultModel?: string;
 
   /**
-   * Optional headers used by OpenRouter for rankings/analytics.
+   * Optional headers used by OpenRouter for app attribution.
    */
   readonly appName?: string;
   readonly referer?: string;
   readonly userAgent?: string;
 
   readonly defaultPolicy?: Partial<OpenRouterRateLimitPolicy>;
+
+  /**
+   * Global limits across all models.
+   */
+  readonly global?: OpenRouterGlobalRateLimitPolicy;
+
+  /**
+   * Per-model limits.
+   */
   readonly models?: Readonly<Record<string, OpenRouterModelRateLimitPolicy>>;
+
   readonly store?: OpenRouterRateLimitStateStore;
   readonly hooks?: OpenRouterRateLimitEventHandlers;
 
-  /**
-   * Public API metadata clients.
-   *
-   * These do not automatically run before every request unless your app calls
-   * getCurrentKeyInfo/listModels/getModelInfo.
-   */
   readonly inspectKeyBeforeRequest?: boolean;
   readonly loadModelsMetadata?: boolean;
   readonly modelsMetadataTtlMs?: number;
@@ -85,6 +116,7 @@ export interface ResolvedOpenRouterRateLimiterConfig {
   readonly referer: string | null;
   readonly userAgent: string | null;
   readonly defaultPolicy: ResolvedOpenRouterRateLimitPolicy;
+  readonly global: OpenRouterGlobalRateLimitPolicy;
   readonly models: Readonly<Record<string, OpenRouterModelRateLimitPolicy>>;
   readonly store: OpenRouterRateLimitStateStore;
   readonly hooks: OpenRouterRateLimitEventHandlers;

@@ -28,6 +28,9 @@ export interface OpenRouterModelRateLimitState {
 
 export interface OpenRouterGlobalRateLimitState {
   readonly activeRequests: number;
+  readonly lastRequestStartedAtMs: number | null;
+  readonly lastRequestFinishedAtMs: number | null;
+  readonly rollingWindow: OpenRouterModelWindowState | null;
   readonly lastKeyInfoCheckedAtMs: number | null;
   readonly lastModelsMetadataCheckedAtMs: number | null;
   readonly globalCooldownUntilMs: number | null;

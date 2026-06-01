@@ -1,32 +1,46 @@
-import {
-  OpenRouterRateLimiter,
-} from './openrouter-rate-limiter.js';
+import { OpenRouterRateLimiter } from './openrouter-rate-limiter.js';
 import {
   createOpenRouterJsonHeaders,
   createOpenRouterRateLimitedFetch,
   type OpenRouterRateLimitedFetch,
-  type OpenRouterRateLimitedFetchInit,
   type OpenRouterRateLimitedFetchMetadata,
 } from './rate-limited-fetch.js';
 import type { OpenRouterRateLimiterConfig } from '../core/domain/rate-limit-config.js';
-import type {
-  OpenRouterKeyInfoResult,
-} from '../core/domain/openrouter-key-info.js';
+import type { OpenRouterKeyInfoResult } from '../core/domain/openrouter-key-info.js';
 import type {
   OpenRouterModelLookupResult,
   OpenRouterModelsListResult,
 } from '../core/domain/openrouter-model-info.js';
-import type {
-  ListOpenRouterModelsOptions,
-} from '../infrastructure/openrouter/openrouter-models-client.js';
+import type { ListOpenRouterModelsOptions } from '../infrastructure/openrouter/openrouter-models-client.js';
 import { OpenRouterRateLimiterError } from '../core/errors/openrouter-rate-limiter-error.js';
 
 export type OpenRouterJsonObject = Readonly<Record<string, unknown>>;
 
 export interface OpenRouterRateLimitedClientOptions
-  extends Omit<OpenRouterRateLimiterConfig, 'store' | 'hooks' | 'models' | 'defaultPolicy'> {
+  extends Omit<
+    OpenRouterRateLimiterConfig,
+    'store' | 'hooks' | 'models' | 'defaultPolicy'
+  > {
   readonly limiter?: OpenRouterRateLimiter;
-  readonly rateLimiter?: Omit<OpenRouterRateLimiterConfig, 'apiKey' | 'baseUrl' | 'defaultModel' | 'fetch' | 'appName' | 'referer' | 'userAgent'>;
+
+  /**
+   * Optional request timeout applied by the high-level client/fetch wrapper.
+   *
+   * This is not part of OpenRouterRateLimiter itself because it belongs to the
+   * HTTP execution layer.
+   */
+  readonly requestTimeoutMs?: number;
+
+  readonly rateLimiter?: Omit<
+    OpenRouterRateLimiterConfig,
+    | 'apiKey'
+    | 'baseUrl'
+    | 'defaultModel'
+    | 'fetch'
+    | 'appName'
+    | 'referer'
+    | 'userAgent'
+  >;
 }
 
 export interface OpenRouterJsonRequestOptions {
@@ -35,7 +49,14 @@ export interface OpenRouterJsonRequestOptions {
   readonly signal?: AbortSignal;
 }
 
-export interface OpenRouterChatCompletionsOptions extends OpenRouterJsonRequestOptions {}
+export interface OpenRouterChatCompletionsOptions
+  extends OpenRouterJsonRequestOptions {}
+
+export interface OpenRouterRequestJsonOptions
+  extends OpenRouterJsonRequestOptions {
+  readonly method?: string;
+  readonly body?: unknown;
+}
 
 export interface OpenRouterRateLimitedClient {
   readonly limiter: OpenRouterRateLimiter;
@@ -62,20 +83,19 @@ export interface OpenRouterRateLimitedClient {
   ) => Promise<OpenRouterKeyInfoResult>;
 
   readonly listModels: (
-    options?: ListOpenRouterModelsOptions & { readonly forceRefresh?: boolean },
+    options?: ListOpenRouterModelsOptions & {
+      readonly forceRefresh?: boolean;
+    },
   ) => Promise<OpenRouterModelsListResult>;
 
   readonly getModelInfo: (
     modelId: string,
-    options?: ListOpenRouterModelsOptions & { readonly forceRefresh?: boolean },
+    options?: ListOpenRouterModelsOptions & {
+      readonly forceRefresh?: boolean;
+    },
   ) => Promise<OpenRouterModelLookupResult>;
 
   readonly clearState: () => Promise<void>;
-}
-
-export interface OpenRouterRequestJsonOptions extends OpenRouterJsonRequestOptions {
-  readonly method?: string;
-  readonly body?: unknown;
 }
 
 export function createOpenRouterRateLimitedClient(
@@ -83,28 +103,32 @@ export function createOpenRouterRateLimitedClient(
 ): OpenRouterRateLimitedClient {
   const limiter = options.limiter ?? createLimiterFromClientOptions(options);
   const config = limiter.getConfig();
+  const defaultModel = options.defaultModel ?? config.defaultModel;
 
-const defaultModel = options.defaultModel ?? config.defaultModel;
-
-const fetch = createOpenRouterRateLimitedFetch({
-  limiter,
-  ...(defaultModel !== null && defaultModel !== undefined
-    ? { defaultModel }
-    : {}),
-  defaultHeaders: createOpenRouterJsonHeaders({
-    apiKey: config.apiKey,
-    appName: config.appName,
-    referer: config.referer,
-    userAgent: config.userAgent,
-  }),
-});
+  const fetch = createOpenRouterRateLimitedFetch({
+    limiter,
+    ...(defaultModel !== null && defaultModel !== undefined
+      ? { defaultModel }
+      : {}),
+    ...(options.requestTimeoutMs !== undefined
+      ? { requestTimeoutMs: options.requestTimeoutMs }
+      : {}),
+    defaultHeaders: createOpenRouterJsonHeaders({
+      apiKey: config.apiKey,
+      appName: config.appName,
+      referer: config.referer,
+      userAgent: config.userAgent,
+    }),
+  });
 
   async function requestJson<TResponse = unknown>(
     pathOrUrl: string | URL,
     requestOptions: OpenRouterRequestJsonOptions = {},
   ): Promise<TResponse> {
     const response = await fetch(buildClientUrl(config.baseUrl, pathOrUrl), {
-      method: requestOptions.method ?? (requestOptions.body !== undefined ? 'POST' : 'GET'),
+      method:
+        requestOptions.method ??
+        (requestOptions.body !== undefined ? 'POST' : 'GET'),
       ...(requestOptions.body !== undefined
         ? { body: JSON.stringify(requestOptions.body) }
         : {}),
@@ -174,7 +198,8 @@ const fetch = createOpenRouterRateLimitedFetch({
     chatCompletions,
     getCurrentKeyInfo: (keyOptions) => limiter.getCurrentKeyInfo(keyOptions),
     listModels: (modelsOptions) => limiter.listModels(modelsOptions),
-    getModelInfo: (modelId, modelOptions) => limiter.getModelInfo(modelId, modelOptions),
+    getModelInfo: (modelId, modelOptions) =>
+      limiter.getModelInfo(modelId, modelOptions),
     clearState: () => limiter.clearState(),
   };
 }
@@ -191,11 +216,16 @@ function createLimiterFromClientOptions(
   return new OpenRouterRateLimiter({
     apiKey: options.apiKey,
     ...(options.baseUrl !== undefined ? { baseUrl: options.baseUrl } : {}),
-    ...(options.defaultModel !== undefined ? { defaultModel: options.defaultModel } : {}),
+    ...(options.defaultModel !== undefined
+      ? { defaultModel: options.defaultModel }
+      : {}),
     ...(options.appName !== undefined ? { appName: options.appName } : {}),
     ...(options.referer !== undefined ? { referer: options.referer } : {}),
-    ...(options.userAgent !== undefined ? { userAgent: options.userAgent } : {}),
+    ...(options.userAgent !== undefined
+      ? { userAgent: options.userAgent }
+      : {}),
     ...(options.fetch !== undefined ? { fetch: options.fetch } : {}),
+    ...(options.global !== undefined ? { global: options.global } : {}),
     ...(options.inspectKeyBeforeRequest !== undefined
       ? { inspectKeyBeforeRequest: options.inspectKeyBeforeRequest }
       : {}),
@@ -205,11 +235,25 @@ function createLimiterFromClientOptions(
     ...(options.modelsMetadataTtlMs !== undefined
       ? { modelsMetadataTtlMs: options.modelsMetadataTtlMs }
       : {}),
-    ...(options.keyInfoTtlMs !== undefined ? { keyInfoTtlMs: options.keyInfoTtlMs } : {}),
-    ...(options.clockMode !== undefined ? { clockMode: options.clockMode } : {}),
-    ...(options.rateLimiter?.store !== undefined ? { store: options.rateLimiter.store } : {}),
-    ...(options.rateLimiter?.hooks !== undefined ? { hooks: options.rateLimiter.hooks } : {}),
-    ...(options.rateLimiter?.models !== undefined ? { models: options.rateLimiter.models } : {}),
+    ...(options.keyInfoTtlMs !== undefined
+      ? { keyInfoTtlMs: options.keyInfoTtlMs }
+      : {}),
+    ...(options.clockMode !== undefined
+      ? { clockMode: options.clockMode }
+      : {}),
+
+    ...(options.rateLimiter?.store !== undefined
+      ? { store: options.rateLimiter.store }
+      : {}),
+    ...(options.rateLimiter?.hooks !== undefined
+      ? { hooks: options.rateLimiter.hooks }
+      : {}),
+    ...(options.rateLimiter?.models !== undefined
+      ? { models: options.rateLimiter.models }
+      : {}),
+    ...(options.rateLimiter?.global !== undefined
+      ? { global: options.rateLimiter.global }
+      : {}),
     ...(options.rateLimiter?.defaultPolicy !== undefined
       ? { defaultPolicy: options.rateLimiter.defaultPolicy }
       : {}),
@@ -227,14 +271,14 @@ function buildClientUrl(baseUrl: string, pathOrUrl: string | URL): string {
     ? baseUrl.slice(0, -1)
     : baseUrl;
 
-  const normalizedPath = raw.startsWith('/')
-    ? raw
-    : `/${raw}`;
+  const normalizedPath = raw.startsWith('/') ? raw : `/${raw}`;
 
   return `${normalizedBase}${normalizedPath}`;
 }
 
-async function parseJsonResponse<TResponse>(response: Response): Promise<TResponse> {
+async function parseJsonResponse<TResponse>(
+  response: Response,
+): Promise<TResponse> {
   const rawText = await response.text();
 
   if (!response.ok) {

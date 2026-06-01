@@ -174,3 +174,14 @@ export type {
   OpenRouterRateLimitedFetchInput,
   OpenRouterRateLimitedFetchMetadata,
 } from './application/rate-limited-fetch.js';
+
+export type {
+  OpenRouterAvailabilityConstraint,
+  OpenRouterAvailabilityInspection,
+  OpenRouterAvailabilityInspectionInput,
+  OpenRouterAvailabilityScope,
+} from './core/domain/rate-limit-availability.js';
+
+export type {
+  OpenRouterGlobalRateLimitPolicy,
+} from './core/domain/rate-limit-config.js';

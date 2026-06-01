@@ -6,6 +6,3 @@ coverage
 # Local npm package tarballs
 *.tgz
 
-# Code context generated reports
-.code-context-report/
-.code-context-output/

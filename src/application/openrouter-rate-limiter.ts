@@ -1,4 +1,5 @@
 import type {
+  OpenRouterGlobalRateLimitPolicy,
   OpenRouterModelRateLimitPolicy,
   OpenRouterRateLimiterConfig,
   ResolvedOpenRouterRateLimiterConfig,
@@ -15,19 +16,11 @@ import type {
   OpenRouterModelRateLimitState,
   OpenRouterRateLimitStateSnapshot,
 } from '../core/domain/rate-limit-state.js';
-import { OpenRouterCreditLimitError } from '../core/errors/openrouter-credit-limit-error.js';
-import { OpenRouterRateLimitError } from '../core/errors/openrouter-rate-limit-error.js';
-import {
-  classifyOpenRouterErrorCategory,
-  parseRetryAfterFromHeaders,
-} from '../infrastructure/openrouter/openrouter-response-parser.js';
-import { createMemoryRateLimitStateStore } from '../infrastructure/storage/memory-rate-limit-state-store.js';
-import {
-  createEmptyModelState,
-  createEmptyOpenRouterRateLimitStateSnapshot,
-} from '../infrastructure/storage/rate-limit-state-utils.js';
-import { sleepMs } from '../infrastructure/time/sleep.js';
-import { clampNumber } from '../shared/date-utils.js';
+import type {
+  OpenRouterAvailabilityConstraint,
+  OpenRouterAvailabilityInspection,
+  OpenRouterAvailabilityInspectionInput,
+} from '../core/domain/rate-limit-availability.js';
 import type {
   OpenRouterKeyInfoResult,
 } from '../core/domain/openrouter-key-info.js';
@@ -35,6 +28,12 @@ import type {
   OpenRouterModelLookupResult,
   OpenRouterModelsListResult,
 } from '../core/domain/openrouter-model-info.js';
+import { OpenRouterCreditLimitError } from '../core/errors/openrouter-credit-limit-error.js';
+import { OpenRouterRateLimitError } from '../core/errors/openrouter-rate-limit-error.js';
+import {
+  classifyOpenRouterErrorCategory,
+  parseRetryAfterFromHeaders,
+} from '../infrastructure/openrouter/openrouter-response-parser.js';
 import {
   OpenRouterKeyClient,
 } from '../infrastructure/openrouter/openrouter-key-client.js';
@@ -42,7 +41,13 @@ import {
   OpenRouterModelsClient,
   type ListOpenRouterModelsOptions,
 } from '../infrastructure/openrouter/openrouter-models-client.js';
-
+import { createMemoryRateLimitStateStore } from '../infrastructure/storage/memory-rate-limit-state-store.js';
+import {
+  createEmptyModelState,
+  createEmptyOpenRouterRateLimitStateSnapshot,
+} from '../infrastructure/storage/rate-limit-state-utils.js';
+import { sleepMs } from '../infrastructure/time/sleep.js';
+import { clampNumber } from '../shared/date-utils.js';
 
 interface ModelQueueState {
   activeRequests: number;
@@ -70,11 +75,21 @@ interface MutableOpenRouterRateLimitStateSnapshot {
 
 export class OpenRouterRateLimiter {
   private readonly config: ResolvedOpenRouterRateLimiterConfig;
+
+  private readonly globalQueue: ModelQueueState = {
+    activeRequests: 0,
+    waiters: [],
+  };
+
   private readonly queues = new Map<string, ModelQueueState>();
-    private keyClient: OpenRouterKeyClient | null = null;
-    private modelsClient: OpenRouterModelsClient | null = null;
-    private cachedKeyInfo: OpenRouterKeyInfoResult | null = null;
-    private readonly cachedModelsByKey = new Map<string, OpenRouterModelsListResult>();
+
+  private keyClient: OpenRouterKeyClient | null = null;
+
+  private modelsClient: OpenRouterModelsClient | null = null;
+
+  private cachedKeyInfo: OpenRouterKeyInfoResult | null = null;
+
+  private readonly cachedModelsByKey = new Map<string, OpenRouterModelsListResult>();
 
   public constructor(config: OpenRouterRateLimiterConfig) {
     this.config = resolveOpenRouterRateLimiterConfig(config);
@@ -115,7 +130,7 @@ export class OpenRouterRateLimiter {
         maxRetries,
       });
 
-      await this.acquireModelSlot({
+      await this.acquireExecutionSlots({
         model,
         modelPolicy,
         metadata: request.metadata,
@@ -166,7 +181,7 @@ export class OpenRouterRateLimiter {
           model,
         });
 
-        this.releaseModelSlot(model);
+        this.releaseExecutionSlots(model);
 
         if (!transientFailure.shouldRetry || attempt > maxRetries) {
           throw transientFailure.error;
@@ -189,7 +204,7 @@ export class OpenRouterRateLimiter {
         model,
       });
 
-      this.releaseModelSlot(model);
+      this.releaseExecutionSlots(model);
 
       const failure = await this.classifyResponseFailure({
         model,
@@ -260,97 +275,149 @@ export class OpenRouterRateLimiter {
     await this.config.store.clear();
   }
 
+  public async inspectAvailability(
+    input: OpenRouterAvailabilityInspectionInput,
+  ): Promise<OpenRouterAvailabilityInspection> {
+    const metadata = buildAvailabilityMetadata({
+      input,
+      defaultModel: this.config.defaultModel,
+    });
+
+    const model = resolveRequestModel({
+      metadata,
+      defaultModel: this.config.defaultModel,
+    });
+
+    const snapshot = await this.loadOrCreateMutableState();
+    const modelState = getModelState(snapshot, model);
+    const now = Date.now();
+
+    const globalDecision = getGlobalPreflightWaitDecision({
+      now,
+      globalState: snapshot.global,
+      globalPolicy: this.config.global,
+      metadata,
+    });
+
+    const modelDecision = getPreflightWaitDecision({
+      now,
+      modelState,
+      modelPolicy: this.config.models[model] ?? {},
+      metadata,
+    });
+
+    const constraints = buildAvailabilityConstraints({
+      model,
+      globalDecision,
+      modelDecision,
+    });
+
+    const selectedConstraint = constraints
+      .slice()
+      .sort((a, b) => b.waitMs - a.waitMs)[0];
+
+    return {
+      canRunNow: constraints.length === 0,
+      model,
+      waitMs: selectedConstraint?.waitMs ?? 0,
+      retryAt: selectedConstraint?.retryAt ?? null,
+      reason: selectedConstraint?.reason ?? null,
+      constraints,
+      metadata,
+    };
+  }
+
   public async getCurrentKeyInfo(
-  options: {
-    readonly forceRefresh?: boolean;
-  } = {},
-): Promise<OpenRouterKeyInfoResult> {
-  const now = Date.now();
+    options: {
+      readonly forceRefresh?: boolean;
+    } = {},
+  ): Promise<OpenRouterKeyInfoResult> {
+    const now = Date.now();
 
-  if (
-    !options.forceRefresh &&
-    this.cachedKeyInfo &&
-    now - this.cachedKeyInfo.checkedAtMs <= this.config.keyInfoTtlMs
-  ) {
-    return this.cachedKeyInfo;
+    if (
+      !options.forceRefresh &&
+      this.cachedKeyInfo &&
+      now - this.cachedKeyInfo.checkedAtMs <= this.config.keyInfoTtlMs
+    ) {
+      return this.cachedKeyInfo;
+    }
+
+    const result = await this.getKeyClient().getCurrentKeyInfo();
+
+    this.cachedKeyInfo = result;
+
+    await this.updateGlobalState((global) => {
+      return {
+        ...global,
+        lastKeyInfoCheckedAtMs: result.checkedAtMs,
+        updatedAtMs: Date.now(),
+      };
+    });
+
+    await this.config.hooks.onEvent?.({
+      type: 'key_info',
+      keyInfo: result.keyInfo,
+    });
+
+    return result;
   }
 
-  const result = await this.getKeyClient().getCurrentKeyInfo();
+  public async listModels(
+    options: ListOpenRouterModelsOptions & {
+      readonly forceRefresh?: boolean;
+    } = {},
+  ): Promise<OpenRouterModelsListResult> {
+    const cacheKey = buildModelsCacheKey(options);
+    const now = Date.now();
+    const cached = this.cachedModelsByKey.get(cacheKey);
 
-  this.cachedKeyInfo = result;
+    if (
+      !options.forceRefresh &&
+      cached &&
+      now - cached.loadedAtMs <= this.config.modelsMetadataTtlMs
+    ) {
+      return cached;
+    }
 
-  await this.updateGlobalState((global) => {
-    return {
-      ...global,
-      lastKeyInfoCheckedAtMs: result.checkedAtMs,
-      updatedAtMs: Date.now(),
-    };
-  });
+    const result = await this.getModelsClient().listModels({
+      ...(options.category !== undefined ? { category: options.category } : {}),
+      ...(options.supportedParameters !== undefined
+        ? { supportedParameters: options.supportedParameters }
+        : {}),
+      ...(options.modality !== undefined ? { modality: options.modality } : {}),
+    });
 
-  await this.config.hooks.onEvent?.({
-    type: 'key_info',
-    keyInfo: result.keyInfo,
-  });
+    this.cachedModelsByKey.set(cacheKey, result);
 
-  return result;
-}
+    await this.updateGlobalState((global) => {
+      return {
+        ...global,
+        lastModelsMetadataCheckedAtMs: result.loadedAtMs,
+        updatedAtMs: Date.now(),
+      };
+    });
 
-public async listModels(
-  options: ListOpenRouterModelsOptions & {
-    readonly forceRefresh?: boolean;
-  } = {},
-): Promise<OpenRouterModelsListResult> {
-  const cacheKey = buildModelsCacheKey(options);
-  const now = Date.now();
-  const cached = this.cachedModelsByKey.get(cacheKey);
+    await this.config.hooks.onEvent?.({
+      type: 'models_loaded',
+      models: result.models,
+    });
 
-  if (
-    !options.forceRefresh &&
-    cached &&
-    now - cached.loadedAtMs <= this.config.modelsMetadataTtlMs
-  ) {
-    return cached;
+    return result;
   }
 
-  const result = await this.getModelsClient().listModels({
-    ...(options.category !== undefined ? { category: options.category } : {}),
-    ...(options.supportedParameters !== undefined
-      ? { supportedParameters: options.supportedParameters }
-      : {}),
-    ...(options.modality !== undefined ? { modality: options.modality } : {}),
-  });
+  public async getModelInfo(
+    modelId: string,
+    options: ListOpenRouterModelsOptions & {
+      readonly forceRefresh?: boolean;
+    } = {},
+  ): Promise<OpenRouterModelLookupResult> {
+    const loaded = await this.listModels(options);
 
-  this.cachedModelsByKey.set(cacheKey, result);
-
-  await this.updateGlobalState((global) => {
     return {
-      ...global,
-      lastModelsMetadataCheckedAtMs: result.loadedAtMs,
-      updatedAtMs: Date.now(),
+      model: loaded.models.find((model) => model.id === modelId) ?? null,
+      loadedAtMs: loaded.loadedAtMs,
     };
-  });
-
-  await this.config.hooks.onEvent?.({
-    type: 'models_loaded',
-    models: result.models,
-  });
-
-  return result;
-}
-
-public async getModelInfo(
-  modelId: string,
-  options: ListOpenRouterModelsOptions & {
-    readonly forceRefresh?: boolean;
-  } = {},
-): Promise<OpenRouterModelLookupResult> {
-  const loaded = await this.listModels(options);
-
-  return {
-    model: loaded.models.find((model) => model.id === modelId) ?? null,
-    loadedAtMs: loaded.loadedAtMs,
-  };
-}
+  }
 
   private async waitForPreflightAvailability(params: {
     readonly model: string;
@@ -365,12 +432,24 @@ public async getModelInfo(
       const modelState = getModelState(snapshot, params.model);
       const now = Date.now();
 
-      const decision = getPreflightWaitDecision({
+      const globalDecision = getGlobalPreflightWaitDecision({
+        now,
+        globalState: snapshot.global,
+        globalPolicy: this.config.global,
+        metadata: params.metadata,
+      });
+
+      const modelDecision = getPreflightWaitDecision({
         now,
         modelState,
         modelPolicy: params.modelPolicy,
         metadata: params.metadata,
       });
+
+      const decision = selectPreflightWaitDecision([
+        globalDecision,
+        modelDecision,
+      ]);
 
       if (!decision.shouldWait) {
         return;
@@ -388,16 +467,24 @@ public async getModelInfo(
     }
   }
 
-  private async acquireModelSlot(params: {
+  private async acquireExecutionSlots(params: {
     readonly model: string;
     readonly modelPolicy: OpenRouterModelRateLimitPolicy;
     readonly metadata: OpenRouterRequestMetadata;
     readonly attempt: number;
   }): Promise<void> {
-    const maxConcurrentRequests = params.modelPolicy.maxConcurrentRequests ?? 1;
-    const queue = this.getQueue(params.model);
+    const maxGlobalConcurrentRequests =
+      this.config.global.maxConcurrentRequests ?? Number.POSITIVE_INFINITY;
 
-    while (queue.activeRequests >= maxConcurrentRequests) {
+    const maxModelConcurrentRequests =
+      params.modelPolicy.maxConcurrentRequests ?? 1;
+
+    const modelQueue = this.getQueue(params.model);
+
+    while (
+      this.globalQueue.activeRequests >= maxGlobalConcurrentRequests ||
+      modelQueue.activeRequests >= maxModelConcurrentRequests
+    ) {
       await this.emitLifecycle({
         type: 'request_queued',
         model: params.model,
@@ -406,22 +493,39 @@ public async getModelInfo(
       });
 
       await new Promise<void>((resolve) => {
-        queue.waiters.push(resolve);
+        if (this.globalQueue.activeRequests >= maxGlobalConcurrentRequests) {
+          this.globalQueue.waiters.push(resolve);
+          return;
+        }
+
+        modelQueue.waiters.push(resolve);
       });
     }
 
-    queue.activeRequests += 1;
+    this.globalQueue.activeRequests += 1;
+    modelQueue.activeRequests += 1;
   }
 
-  private releaseModelSlot(model: string): void {
-    const queue = this.getQueue(model);
+  private releaseExecutionSlots(model: string): void {
+    this.globalQueue.activeRequests = Math.max(
+      0,
+      this.globalQueue.activeRequests - 1,
+    );
 
-    queue.activeRequests = Math.max(0, queue.activeRequests - 1);
+    const modelQueue = this.getQueue(model);
 
-    const next = queue.waiters.shift();
+    modelQueue.activeRequests = Math.max(0, modelQueue.activeRequests - 1);
 
-    if (next) {
-      next();
+    const globalNext = this.globalQueue.waiters.shift();
+
+    if (globalNext) {
+      globalNext();
+    }
+
+    const modelNext = modelQueue.waiters.shift();
+
+    if (modelNext) {
+      modelNext();
     }
   }
 
@@ -719,13 +823,32 @@ public async getModelInfo(
         state: modelState,
         now,
         inputCharacters: params.metadata.estimatedInputCharacters ?? 0,
-        modelPolicy: this.config.models[params.model] ?? {},
+        rateLimitPolicy: this.config.models[params.model] ?? {},
       }),
     };
 
     snapshot.global = {
       ...snapshot.global,
       activeRequests: snapshot.global.activeRequests + 1,
+      lastRequestStartedAtMs: now,
+      rollingWindow: updateRollingWindowOnRequest({
+        state: {
+          model: '__global__',
+          activeRequests: snapshot.global.activeRequests,
+          lastRequestStartedAtMs: snapshot.global.lastRequestStartedAtMs,
+          lastRequestFinishedAtMs: snapshot.global.lastRequestFinishedAtMs,
+          cooldownUntilMs: snapshot.global.globalCooldownUntilMs,
+          cooldownReason: snapshot.global.globalCooldownReason,
+          lastRetryAfterMs: null,
+          consecutiveRateLimitCount: 0,
+          consecutiveTransientErrorCount: 0,
+          rollingWindow: snapshot.global.rollingWindow,
+          updatedAtMs: snapshot.global.updatedAtMs,
+        },
+        now,
+        inputCharacters: params.metadata.estimatedInputCharacters ?? 0,
+        rateLimitPolicy: this.config.global,
+      }),
       updatedAtMs: now,
     };
 
@@ -799,6 +922,7 @@ public async getModelInfo(
     snapshot.global = {
       ...snapshot.global,
       activeRequests: Math.max(0, snapshot.global.activeRequests - 1),
+      lastRequestFinishedAtMs: now,
       updatedAtMs: now,
     };
 
@@ -880,51 +1004,52 @@ public async getModelInfo(
     await this.config.hooks.onRetry?.(event);
     await this.config.hooks.onEvent?.(event);
   }
+
   private getKeyClient(): OpenRouterKeyClient {
-  if (this.keyClient) {
+    if (this.keyClient) {
+      return this.keyClient;
+    }
+
+    this.keyClient = new OpenRouterKeyClient({
+      apiKey: this.config.apiKey,
+      baseUrl: this.config.baseUrl,
+      fetch: this.config.fetch,
+      ...(this.config.appName !== null ? { appName: this.config.appName } : {}),
+      ...(this.config.referer !== null ? { referer: this.config.referer } : {}),
+      ...(this.config.userAgent !== null ? { userAgent: this.config.userAgent } : {}),
+    });
+
     return this.keyClient;
   }
 
-  this.keyClient = new OpenRouterKeyClient({
-    apiKey: this.config.apiKey,
-    baseUrl: this.config.baseUrl,
-    fetch: this.config.fetch,
-    ...(this.config.appName !== null ? { appName: this.config.appName } : {}),
-    ...(this.config.referer !== null ? { referer: this.config.referer } : {}),
-    ...(this.config.userAgent !== null ? { userAgent: this.config.userAgent } : {}),
-  });
+  private getModelsClient(): OpenRouterModelsClient {
+    if (this.modelsClient) {
+      return this.modelsClient;
+    }
 
-  return this.keyClient;
-}
+    this.modelsClient = new OpenRouterModelsClient({
+      apiKey: this.config.apiKey,
+      baseUrl: this.config.baseUrl,
+      fetch: this.config.fetch,
+      ...(this.config.appName !== null ? { appName: this.config.appName } : {}),
+      ...(this.config.referer !== null ? { referer: this.config.referer } : {}),
+      ...(this.config.userAgent !== null ? { userAgent: this.config.userAgent } : {}),
+    });
 
-private getModelsClient(): OpenRouterModelsClient {
-  if (this.modelsClient) {
     return this.modelsClient;
   }
 
-  this.modelsClient = new OpenRouterModelsClient({
-    apiKey: this.config.apiKey,
-    baseUrl: this.config.baseUrl,
-    fetch: this.config.fetch,
-    ...(this.config.appName !== null ? { appName: this.config.appName } : {}),
-    ...(this.config.referer !== null ? { referer: this.config.referer } : {}),
-    ...(this.config.userAgent !== null ? { userAgent: this.config.userAgent } : {}),
-  });
+  private async updateGlobalState(
+    updater: (
+      global: OpenRouterGlobalRateLimitState,
+    ) => OpenRouterGlobalRateLimitState,
+  ): Promise<void> {
+    const snapshot = await this.loadOrCreateMutableState();
 
-  return this.modelsClient;
-}
+    snapshot.global = updater(snapshot.global);
 
-private async updateGlobalState(
-  updater: (
-    global: OpenRouterGlobalRateLimitState,
-  ) => OpenRouterGlobalRateLimitState,
-): Promise<void> {
-  const snapshot = await this.loadOrCreateMutableState();
-
-  snapshot.global = updater(snapshot.global);
-
-  await this.config.store.save(snapshot);
-}
+    await this.config.store.save(snapshot);
+  }
 }
 
 function resolveOpenRouterRateLimiterConfig(
@@ -946,6 +1071,9 @@ function resolveOpenRouterRateLimiterConfig(
     apiKey: config.apiKey,
     baseUrl: config.baseUrl ?? 'https://openrouter.ai/api/v1',
     defaultModel: config.defaultModel ?? null,
+    appName: normalizeOptionalString(config.appName),
+    referer: normalizeOptionalString(config.referer),
+    userAgent: normalizeOptionalString(config.userAgent),
     defaultPolicy: {
       mode: config.defaultPolicy?.mode ?? 'wait',
       maxRetries: config.defaultPolicy?.maxRetries ?? 5,
@@ -960,6 +1088,7 @@ function resolveOpenRouterRateLimiterConfig(
       retryOnBadGateway: config.defaultPolicy?.retryOnBadGateway ?? true,
       retryOnTimeout: config.defaultPolicy?.retryOnTimeout ?? true,
     },
+    global: config.global ?? {},
     models: config.models ?? {},
     store: config.store ?? createMemoryRateLimitStateStore(),
     hooks: config.hooks ?? {},
@@ -969,32 +1098,7 @@ function resolveOpenRouterRateLimiterConfig(
     keyInfoTtlMs: config.keyInfoTtlMs ?? 1000 * 60,
     fetch: fetchImplementation,
     clockMode: config.clockMode ?? 'system',
-    appName: normalizeOptionalString(config.appName),
-referer: normalizeOptionalString(config.referer),
-userAgent: normalizeOptionalString(config.userAgent),
   };
-}
-
-function normalizeOptionalString(value: string | undefined): string | null {
-  if (value === undefined) {
-    return null;
-  }
-
-  const trimmed = value.trim();
-
-  return trimmed.length > 0 ? trimmed : null;
-}
-
-function buildModelsCacheKey(
-  options: ListOpenRouterModelsOptions & {
-    readonly forceRefresh?: boolean;
-  },
-): string {
-  return JSON.stringify({
-    category: options.category ?? null,
-    modality: options.modality ?? null,
-    supportedParameters: options.supportedParameters ?? [],
-  });
 }
 
 function resolveRequestModel(params: {
@@ -1178,13 +1282,135 @@ function getRollingWindowWaitDecision(params: {
   };
 }
 
+function getGlobalPreflightWaitDecision(params: {
+  readonly now: number;
+  readonly globalState: OpenRouterGlobalRateLimitState;
+  readonly globalPolicy: OpenRouterGlobalRateLimitPolicy;
+  readonly metadata: OpenRouterRequestMetadata;
+}): PreflightWaitDecision {
+  const cooldownUntilMs = params.globalState.globalCooldownUntilMs;
+
+  if (cooldownUntilMs !== null && cooldownUntilMs > params.now) {
+    return {
+      shouldWait: true,
+      delayMs: cooldownUntilMs - params.now,
+      reason: params.globalState.globalCooldownReason ?? 'rate_limit',
+    };
+  }
+
+  const minIntervalMs = params.globalPolicy.minIntervalMs ?? 0;
+  const lastStartedAt = params.globalState.lastRequestStartedAtMs;
+
+  if (
+    minIntervalMs > 0 &&
+    lastStartedAt !== null &&
+    params.now - lastStartedAt < minIntervalMs
+  ) {
+    return {
+      shouldWait: true,
+      delayMs: minIntervalMs - (params.now - lastStartedAt),
+      reason: 'manual_policy',
+    };
+  }
+
+  return getGlobalRollingWindowWaitDecision(params);
+}
+
+function getGlobalRollingWindowWaitDecision(params: {
+  readonly now: number;
+  readonly globalState: OpenRouterGlobalRateLimitState;
+  readonly globalPolicy: OpenRouterGlobalRateLimitPolicy;
+  readonly metadata: OpenRouterRequestMetadata;
+}): PreflightWaitDecision {
+  const windowMs = params.globalPolicy.windowMs;
+
+  if (!windowMs || windowMs <= 0) {
+    return {
+      shouldWait: false,
+      delayMs: 0,
+      reason: 'unknown',
+    };
+  }
+
+  const rollingWindow = params.globalState.rollingWindow;
+
+  if (!rollingWindow) {
+    return {
+      shouldWait: false,
+      delayMs: 0,
+      reason: 'unknown',
+    };
+  }
+
+  const windowEndsAt = rollingWindow.windowStartedAtMs + windowMs;
+
+  if (params.now >= windowEndsAt) {
+    return {
+      shouldWait: false,
+      delayMs: 0,
+      reason: 'unknown',
+    };
+  }
+
+  const requestsLimit = params.globalPolicy.requestsPerWindow;
+
+  if (
+    requestsLimit !== undefined &&
+    requestsLimit > 0 &&
+    rollingWindow.requestCount >= requestsLimit
+  ) {
+    return {
+      shouldWait: true,
+      delayMs: windowEndsAt - params.now,
+      reason: 'manual_policy',
+    };
+  }
+
+  const inputCharactersLimit = params.globalPolicy.inputCharactersPerWindow;
+  const requestCharacters = params.metadata.estimatedInputCharacters ?? 0;
+
+  if (
+    inputCharactersLimit !== undefined &&
+    inputCharactersLimit > 0 &&
+    rollingWindow.inputCharacters + requestCharacters > inputCharactersLimit
+  ) {
+    return {
+      shouldWait: true,
+      delayMs: windowEndsAt - params.now,
+      reason: 'manual_policy',
+    };
+  }
+
+  return {
+    shouldWait: false,
+    delayMs: 0,
+    reason: 'unknown',
+  };
+}
+
+function selectPreflightWaitDecision(
+  decisions: readonly PreflightWaitDecision[],
+): PreflightWaitDecision {
+  const waiting = decisions
+    .filter((decision) => decision.shouldWait)
+    .sort((a, b) => b.delayMs - a.delayMs);
+
+  return waiting[0] ?? {
+    shouldWait: false,
+    delayMs: 0,
+    reason: 'unknown',
+  };
+}
+
 function updateRollingWindowOnRequest(params: {
   readonly state: OpenRouterModelRateLimitState;
   readonly now: number;
   readonly inputCharacters: number;
-  readonly modelPolicy: OpenRouterModelRateLimitPolicy;
+  readonly rateLimitPolicy:
+    | OpenRouterModelRateLimitPolicy
+    | OpenRouterGlobalRateLimitPolicy;
 }): OpenRouterModelRateLimitState['rollingWindow'] {
-  const windowMs = params.modelPolicy.windowMs;
+  const windowMs = params.rateLimitPolicy.windowMs;
 
   if (!windowMs || windowMs <= 0) {
     return params.state.rollingWindow;
@@ -1308,6 +1534,11 @@ function toMutableSnapshot(
     version: 1,
     global: {
       ...snapshot.global,
+      rollingWindow: snapshot.global.rollingWindow
+        ? {
+            ...snapshot.global.rollingWindow,
+          }
+        : null,
     },
     models: Object.fromEntries(
       Object.entries(snapshot.models).map(([model, state]) => {
@@ -1325,4 +1556,119 @@ function toMutableSnapshot(
       }),
     ),
   };
+}
+
+function normalizeOptionalString(value: string | undefined): string | null {
+  if (value === undefined) {
+    return null;
+  }
+
+  const trimmed = value.trim();
+
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function buildModelsCacheKey(
+  options: ListOpenRouterModelsOptions & {
+    readonly forceRefresh?: boolean;
+  },
+): string {
+  return JSON.stringify({
+    category: options.category ?? null,
+    modality: options.modality ?? null,
+    supportedParameters: options.supportedParameters ?? [],
+  });
+}
+
+function buildAvailabilityMetadata(params: {
+  readonly input: OpenRouterAvailabilityInspectionInput;
+  readonly defaultModel: string | null;
+}): OpenRouterRequestMetadata {
+  const model = params.input.model ?? params.defaultModel;
+
+  if (!model) {
+    throw new Error(
+      'inspectAvailability requires input.model or config.defaultModel.',
+    );
+  }
+
+  return {
+    model,
+    ...(params.input.fallbackModels !== undefined
+      ? { fallbackModels: params.input.fallbackModels }
+      : {}),
+    ...(params.input.estimatedInputCharacters !== undefined
+      ? { estimatedInputCharacters: params.input.estimatedInputCharacters }
+      : {}),
+    ...(params.input.estimatedOutputTokens !== undefined
+      ? { estimatedOutputTokens: params.input.estimatedOutputTokens }
+      : {}),
+    ...(params.input.operation !== undefined
+      ? { operation: params.input.operation }
+      : {}),
+    ...(params.input.requestId !== undefined
+      ? { requestId: params.input.requestId }
+      : {}),
+    ...(params.input.allowWaiting !== undefined
+      ? { allowWaiting: params.input.allowWaiting }
+      : {}),
+    ...(params.input.maxRetries !== undefined
+      ? { maxRetries: params.input.maxRetries }
+      : {}),
+    ...(params.input.signal !== undefined
+      ? { signal: params.input.signal }
+      : {}),
+  };
+}
+
+function buildAvailabilityConstraints(params: {
+  readonly model: string;
+  readonly globalDecision: PreflightWaitDecision;
+  readonly modelDecision: PreflightWaitDecision;
+}): readonly OpenRouterAvailabilityConstraint[] {
+  const constraints: OpenRouterAvailabilityConstraint[] = [];
+
+  if (params.globalDecision.shouldWait) {
+    constraints.push({
+      scope: 'global',
+      reason: params.globalDecision.reason,
+      waitMs: params.globalDecision.delayMs,
+      retryAt: new Date(Date.now() + params.globalDecision.delayMs),
+      message: buildAvailabilityMessage({
+        scope: 'global',
+        model: params.model,
+        decision: params.globalDecision,
+      }),
+    });
+  }
+
+  if (params.modelDecision.shouldWait) {
+    constraints.push({
+      scope: 'model',
+      reason: params.modelDecision.reason,
+      waitMs: params.modelDecision.delayMs,
+      retryAt: new Date(Date.now() + params.modelDecision.delayMs),
+      message: buildAvailabilityMessage({
+        scope: 'model',
+        model: params.model,
+        decision: params.modelDecision,
+      }),
+    });
+  }
+
+  return constraints;
+}
+
+function buildAvailabilityMessage(params: {
+  readonly scope: 'global' | 'model';
+  readonly model: string;
+  readonly decision: PreflightWaitDecision;
+}): string {
+  return [
+    params.scope === 'global'
+      ? 'Global OpenRouter limiter is not ready.'
+      : `OpenRouter model "${params.model}" is not ready.`,
+    `Reason: ${params.decision.reason}.`,
+    `Wait: ${params.decision.delayMs.toString()}ms.`,
+  ].join(' ');
 }

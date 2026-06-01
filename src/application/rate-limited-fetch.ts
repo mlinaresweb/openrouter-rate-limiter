@@ -15,11 +15,6 @@ export interface OpenRouterRateLimitedFetchMetadata {
 }
 
 export interface OpenRouterRateLimitedFetchInit extends RequestInit {
-  /**
-   * Metadata consumed only by openrouter-rate-limiter.
-   *
-   * It is removed before calling the real fetch implementation.
-   */
   readonly openRouter?: OpenRouterRateLimitedFetchMetadata;
 }
 
@@ -39,52 +34,25 @@ export interface EstimateOpenRouterInputCharactersInput {
 
 export interface CreateOpenRouterRateLimitedFetchOptions {
   readonly limiter: OpenRouterRateLimiter;
-
-  /**
-   * Custom fetch implementation.
-   *
-   * Defaults to limiter.getConfig().fetch.
-   */
   readonly fetch?: typeof fetch;
-
-  /**
-   * Used when neither init.openRouter.model nor request body model exists.
-   */
   readonly defaultModel?: string;
-
-  /**
-   * Default operation name for observability hooks.
-   */
   readonly defaultOperation?: string;
-
-  /**
-   * Optional default headers added to every request.
-   *
-   * Request headers override these.
-   */
   readonly defaultHeaders?: HeadersInit;
-
-  /**
-   * Custom input size estimator.
-   *
-   * If omitted, the wrapper uses request body text length when available.
-   */
+  readonly requestTimeoutMs?: number;
   readonly estimateInputCharacters?: (
     input: EstimateOpenRouterInputCharactersInput,
   ) => number | Promise<number>;
-
-  /**
-   * If true, the wrapper tries to read Request body from input.clone()
-   * when init.body is not provided.
-   *
-   * Defaults to true.
-   */
   readonly inspectRequestBody?: boolean;
 }
 
 interface BuiltFetchMetadata {
   readonly metadata: OpenRouterRequestMetadata;
   readonly fetchInit: RequestInit | undefined;
+}
+
+interface TimeoutFetchInit {
+  readonly init: RequestInit | undefined;
+  readonly cleanup: () => void;
 }
 
 export function createOpenRouterRateLimitedFetch(
@@ -105,13 +73,22 @@ export function createOpenRouterRateLimitedFetch(
     const result = await options.limiter.execute<Response>({
       metadata: built.metadata,
       execute: async () => {
-        const response = await fetchImplementation(input, built.fetchInit);
+        const timeoutInit = createTimeoutFetchInit({
+          init: built.fetchInit,
+          requestTimeoutMs: options.requestTimeoutMs,
+        });
 
-        return {
-          value: response,
-          status: response.status,
-          headers: response.headers,
-        };
+        try {
+          const response = await fetchImplementation(input, timeoutInit.init);
+
+          return {
+            value: response,
+            status: response.status,
+            headers: response.headers,
+          };
+        } finally {
+          timeoutInit.cleanup();
+        }
       },
     });
 
@@ -214,14 +191,14 @@ async function buildFetchMetadata(params: {
     params.init?.openRouter?.fallbackModels ??
     extracted.fallbackModels;
 
+  const signal =
+    params.init?.openRouter?.signal ??
+    (params.init?.signal instanceof AbortSignal ? params.init.signal : undefined);
+
   const metadata: OpenRouterRequestMetadata = {
     model,
-    ...(fallbackModels.length > 0
-      ? { fallbackModels }
-      : {}),
-    ...(estimatedInputCharacters !== null
-      ? { estimatedInputCharacters }
-      : {}),
+    ...(fallbackModels.length > 0 ? { fallbackModels } : {}),
+    ...(estimatedInputCharacters !== null ? { estimatedInputCharacters } : {}),
     ...(params.init?.openRouter?.estimatedOutputTokens !== undefined
       ? { estimatedOutputTokens: params.init.openRouter.estimatedOutputTokens }
       : {}),
@@ -239,11 +216,7 @@ async function buildFetchMetadata(params: {
     ...(params.init?.openRouter?.maxRetries !== undefined
       ? { maxRetries: params.init.openRouter.maxRetries }
       : {}),
-    ...(params.init?.openRouter?.signal !== undefined
-      ? { signal: params.init.openRouter.signal }
-      : params.init?.signal instanceof AbortSignal
-        ? { signal: params.init.signal }
-        : {}),
+    ...(signal !== undefined ? { signal } : {}),
   };
 
   return {
@@ -273,9 +246,7 @@ function stripOpenRouterMetadata(params: {
 
   return {
     ...rest,
-    ...(mergedHeaders !== undefined
-      ? { headers: mergedHeaders }
-      : {}),
+    ...(mergedHeaders !== undefined ? { headers: mergedHeaders } : {}),
   };
 }
 
@@ -424,4 +395,51 @@ function parseJsonBodyText(bodyText: string | null): unknown {
   } catch {
     return null;
   }
+}
+
+function createTimeoutFetchInit(params: {
+  readonly init: RequestInit | undefined;
+  readonly requestTimeoutMs: number | undefined;
+}): TimeoutFetchInit {
+  if (
+    params.requestTimeoutMs === undefined ||
+    params.requestTimeoutMs <= 0
+  ) {
+    return {
+      init: params.init,
+      cleanup: () => {
+        // No timeout configured.
+      },
+    };
+  }
+
+  const controller = new AbortController();
+  const existingSignal = params.init?.signal;
+
+  if (existingSignal?.aborted) {
+    controller.abort();
+  }
+
+  const onAbort = (): void => {
+    controller.abort();
+  };
+
+  existingSignal?.addEventListener('abort', onAbort, {
+    once: true,
+  });
+
+  const timeout = setTimeout(() => {
+    controller.abort();
+  }, params.requestTimeoutMs);
+
+  return {
+    init: {
+      ...(params.init ?? {}),
+      signal: controller.signal,
+    },
+    cleanup: () => {
+      clearTimeout(timeout);
+      existingSignal?.removeEventListener('abort', onAbort);
+    },
+  };
 }

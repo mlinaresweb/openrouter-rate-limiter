@@ -1,4 +1,5 @@
 import type {
+  OpenRouterCooldownReason,
   OpenRouterGlobalRateLimitState,
   OpenRouterModelRateLimitState,
   OpenRouterModelWindowState,
@@ -21,6 +22,9 @@ export function createEmptyGlobalState(
 ): OpenRouterGlobalRateLimitState {
   return {
     activeRequests: 0,
+    lastRequestStartedAtMs: null,
+    lastRequestFinishedAtMs: null,
+    rollingWindow: null,
     lastKeyInfoCheckedAtMs: null,
     lastModelsMetadataCheckedAtMs: null,
     globalCooldownUntilMs: null,
@@ -69,6 +73,11 @@ export function cloneOpenRouterRateLimitStateSnapshot(
     version: 1,
     global: {
       ...snapshot.global,
+      rollingWindow: snapshot.global.rollingWindow
+        ? {
+            ...snapshot.global.rollingWindow,
+          }
+        : null,
     },
     models: Object.fromEntries(
       Object.entries(snapshot.models).map(([model, state]) => {
@@ -140,19 +149,17 @@ function parseGlobalState(value: unknown): OpenRouterGlobalRateLimitState | null
   }
 
   const activeRequests = readFiniteNumber(value, 'activeRequests');
-
-  if (activeRequests === null) {
-    return null;
-  }
-
   const updatedAtMs = readFiniteNumber(value, 'updatedAtMs');
 
-  if (updatedAtMs === null) {
+  if (activeRequests === null || updatedAtMs === null) {
     return null;
   }
 
   return {
     activeRequests,
+    lastRequestStartedAtMs: readNullableFiniteNumber(value, 'lastRequestStartedAtMs'),
+    lastRequestFinishedAtMs: readNullableFiniteNumber(value, 'lastRequestFinishedAtMs'),
+    rollingWindow: parseNullableModelWindowState(value.rollingWindow),
     lastKeyInfoCheckedAtMs: readNullableFiniteNumber(value, 'lastKeyInfoCheckedAtMs'),
     lastModelsMetadataCheckedAtMs: readNullableFiniteNumber(
       value,
@@ -269,7 +276,7 @@ function readNonEmptyString(
 function readNullableCooldownReason(
   record: Readonly<Record<string, unknown>>,
   key: string,
-): OpenRouterGlobalRateLimitState['globalCooldownReason'] {
+): OpenRouterCooldownReason | null {
   const value = record[key];
 
   if (value === null || value === undefined) {
