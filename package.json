@@ -1,10 +1,13 @@
 {
   "name": "openrouter-rate-limiter",
   "version": "0.1.0",
-  "description": "Production-ready OpenRouter rate limiter for Node.js, CLIs and automation workflows.",
+  "description": "Production-ready OpenRouter rate limiter with retries, Retry-After handling, cooldown persistence, fetch wrapper and SDK-style client.",
   "type": "module",
-  "license": "MIT",
-  "author": "mlinaresweb",
+  "license": "Apache-2.0",
+  "author": {
+    "name": "Manel Linares",
+    "url": "https://github.com/mlinaresweb"
+  },
   "homepage": "https://github.com/mlinaresweb/openrouter-rate-limiter#readme",
   "repository": {
     "type": "git",
@@ -17,23 +20,25 @@
     "openrouter",
     "rate-limit",
     "rate-limiter",
-    "ai",
-    "llm",
     "retry",
     "retry-after",
-    "backoff",
+    "cooldown",
+    "ai",
+    "llm",
+    "fetch",
     "typescript",
-    "node",
-    "cli",
-    "automation"
+    "nodejs"
   ],
   "sideEffects": false,
-  "main": "./dist/index.js",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs",
+      "default": "./dist/index.js"
     },
     "./package.json": "./package.json"
   },
@@ -41,32 +46,34 @@
     "dist",
     "README.md",
     "LICENSE",
-    "NOTICE.md"
+    "NOTICE.md",
+    "package.json"
   ],
+  "engines": {
+    "node": ">=20"
+  },
   "publishConfig": {
-    "access": "public"
+    "access": "public",
+    "provenance": false
   },
   "scripts": {
     "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
     "build": "tsup",
     "check": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
+    "verify:consumer": "tsx scripts/verify-package-consumption.ts",
     "pack:dry": "npm run clean && npm run check && npm run test && npm run build && npm pack --dry-run",
     "pack:local": "npm run clean && npm run check && npm run test && npm run build && npm pack",
-    "release:check": "npm run clean && npm run check && npm run test && npm run build && npm pack --dry-run",
+    "release:check": "npm run clean && npm run check && npm run test && npm run build && npm run verify:consumer && npm pack --dry-run",
     "publish:dry": "npm run release:check && npm publish --dry-run --access public",
     "publish:public": "npm run release:check && npm publish --access public",
-    "prepublishOnly": "npm run clean && npm run check && npm run test && npm run build",
-    "verify:consumer": "tsx scripts/verify-package-consumption.ts"
+    "prepublishOnly": "npm run release:check"
   },
+  "dependencies": {},
   "devDependencies": {
-    "@types/node": "^22.19.19",
-    "tsup": "^8.0.0",
+    "tsup": "^8.3.5",
     "tsx": "^4.19.2",
-    "typescript": "^5.0.0",
-    "vitest": "^4.1.5"
-  },
-  "engines": {
-    "node": ">=20"
+    "typescript": "^5.7.2",
+    "vitest": "^4.1.7"
   }
 }

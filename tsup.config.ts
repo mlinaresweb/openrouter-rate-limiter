@@ -2,14 +2,19 @@ import { defineConfig } from 'tsup';
 
 export default defineConfig({
   entry: ['src/index.ts'],
-  format: ['esm'],
-  target: 'node20',
+  format: ['esm', 'cjs'],
+  target: 'es2022',
   platform: 'node',
-  outDir: 'dist',
   dts: true,
   sourcemap: true,
   clean: true,
+  minify: false,
   splitting: false,
-  treeshake: false,
-  skipNodeModulesBundle: true,
+  treeshake: true,
+  outDir: 'dist',
+  outExtension({ format }) {
+    return {
+      js: format === 'cjs' ? '.cjs' : '.js',
+    };
+  },
 });

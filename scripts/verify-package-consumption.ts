@@ -103,10 +103,17 @@ async function main(): Promise<void> {
       });
     });
 
-    await runStep('Running external consumer runtime smoke test', async () => {
+    await runStep('Running external consumer ESM smoke test', async () => {
       await runNode({
         cwd: consumerRoot,
         args: [path.join(consumerRoot, 'runtime.mjs')],
+      });
+    });
+
+    await runStep('Running external consumer CommonJS smoke test', async () => {
+      await runNode({
+        cwd: consumerRoot,
+        args: [path.join(consumerRoot, 'runtime.cjs')],
       });
     });
 
@@ -141,6 +148,7 @@ async function createConsumerProject(consumerRoot: string): Promise<void> {
         scripts: {
           check: 'tsc -p tsconfig.json --noEmit',
           start: 'node runtime.mjs',
+          'start:cjs': 'node runtime.cjs',
         },
         dependencies: {},
         devDependencies: {},
@@ -186,6 +194,12 @@ async function createConsumerProject(consumerRoot: string): Promise<void> {
     buildConsumerRuntimeFixture(),
     'utf8',
   );
+
+  await writeFile(
+    path.join(consumerRoot, 'runtime.cjs'),
+    buildConsumerCommonJsRuntimeFixture(),
+    'utf8',
+  );
 }
 
 function buildConsumerTypeScriptFixture(): string {
@@ -197,11 +211,12 @@ function buildConsumerTypeScriptFixture(): string {
     '  createOpenRouterRateLimitedClient,',
     '  createOpenRouterRateLimitedFetch,',
     '  withOpenRouterMetadata,',
+    '  type OpenRouterAvailabilityInspection,',
     '  type OpenRouterLimitDecision,',
     '  type OpenRouterRateLimitEvent,',
     '  type OpenRouterRateLimitedClient,',
     '  type OpenRouterRateLimiterConfig,',
-    '} from "openrouter-rate-limiter";',
+    '} from "' + PACKAGE_NAME + '";',
     '',
     'const events: OpenRouterRateLimitEvent[] = [];',
     '',
@@ -209,6 +224,12 @@ function buildConsumerTypeScriptFixture(): string {
     '  apiKey: "sk-or-test",',
     '  defaultModel: "openai/gpt-4o-mini",',
     '  appName: "Consumer Test",',
+    '  global: {',
+    '    maxConcurrentRequests: 1,',
+    '    minIntervalMs: 1,',
+    '    requestsPerWindow: 20,',
+    '    windowMs: 60_000,',
+    '  },',
     '  defaultPolicy: {',
     '    mode: "wait",',
     '    maxRetries: 2,',
@@ -240,8 +261,18 @@ function buildConsumerTypeScriptFixture(): string {
     '',
     'const limiter = new OpenRouterRateLimiter(config);',
     '',
+    'const availability: OpenRouterAvailabilityInspection = await limiter.inspectAvailability({',
+    '  model: "openai/gpt-4o-mini",',
+    '  estimatedInputCharacters: 10,',
+    '});',
+    '',
+    'if (!availability.model) {',
+    '  throw new Error("Availability inspection did not resolve a model.");',
+    '}',
+    '',
     'const openRouterFetch = createOpenRouterRateLimitedFetch({',
     '  limiter,',
+    '  requestTimeoutMs: 5_000,',
     '  fetch: async () => {',
     '    return new Response(JSON.stringify({ ok: true }), {',
     '      status: 200,',
@@ -263,6 +294,7 @@ function buildConsumerTypeScriptFixture(): string {
     'const client: OpenRouterRateLimitedClient = createOpenRouterRateLimitedClient({',
     '  apiKey: "sk-or-test",',
     '  defaultModel: "openai/gpt-4o-mini",',
+    '  requestTimeoutMs: 5_000,',
     '  fetch: async () => {',
     '    return new Response(JSON.stringify({ id: "chatcmpl-test", choices: [] }), {',
     '      status: 200,',
@@ -323,7 +355,7 @@ function buildConsumerRuntimeFixture(): string {
     '  createMemoryRateLimitStateStore,',
     '  createOpenRouterRateLimitedClient,',
     '  createOpenRouterRateLimitedFetch,',
-    '} from "openrouter-rate-limiter";',
+    '} from "' + PACKAGE_NAME + '";',
     '',
     'const limiter = new OpenRouterRateLimiter({',
     '  apiKey: "sk-or-test",',
@@ -339,8 +371,17 @@ function buildConsumerRuntimeFixture(): string {
     '  },',
     '});',
     '',
+    'const availability = await limiter.inspectAvailability({',
+    '  model: "openai/gpt-4o-mini",',
+    '});',
+    '',
+    'if (!availability.model) {',
+    '  throw new Error("Expected availability inspection to resolve a model.");',
+    '}',
+    '',
     'const openRouterFetch = createOpenRouterRateLimitedFetch({',
     '  limiter,',
+    '  requestTimeoutMs: 5_000,',
     '  fetch: async () => {',
     '    return new Response(JSON.stringify({ ok: true }), {',
     '      status: 200,',
@@ -366,6 +407,7 @@ function buildConsumerRuntimeFixture(): string {
     'const client = createOpenRouterRateLimitedClient({',
     '  apiKey: "sk-or-test",',
     '  defaultModel: "openai/gpt-4o-mini",',
+    '  requestTimeoutMs: 5_000,',
     '  fetch: async () => {',
     '    return new Response(JSON.stringify({ id: "chatcmpl-runtime", choices: [] }), {',
     '      status: 200,',
@@ -385,7 +427,65 @@ function buildConsumerRuntimeFixture(): string {
     '  throw new Error("Expected runtime chat completion fixture to work.");',
     '}',
     '',
-    'console.log("runtime-ok");',
+    'console.log("runtime-esm-ok");',
+    '',
+  ].join('\n');
+}
+
+function buildConsumerCommonJsRuntimeFixture(): string {
+  return [
+    'const {',
+    '  OpenRouterRateLimiter,',
+    '  createMemoryRateLimitStateStore,',
+    '  createOpenRouterRateLimitedFetch,',
+    '} = require("' + PACKAGE_NAME + '");',
+    '',
+    'async function main() {',
+    '  const limiter = new OpenRouterRateLimiter({',
+    '    apiKey: "sk-or-test",',
+    '    defaultModel: "openai/gpt-4o-mini",',
+    '    store: createMemoryRateLimitStateStore(),',
+    '    defaultPolicy: {',
+    '      mode: "wait",',
+    '      maxRetries: 1,',
+    '      baseDelayMs: 1,',
+    '      maxDelayMs: 5,',
+    '      jitterRatio: 0,',
+    '      cooldownNotificationIntervalMs: 1,',
+    '    },',
+    '  });',
+    '',
+    '  const openRouterFetch = createOpenRouterRateLimitedFetch({',
+    '    limiter,',
+    '    fetch: async () => {',
+    '      return new Response(JSON.stringify({ ok: true }), {',
+    '        status: 200,',
+    '        headers: {',
+    '          "Content-Type": "application/json",',
+    '        },',
+    '      });',
+    '    },',
+    '  });',
+    '',
+    '  const response = await openRouterFetch("https://openrouter.ai/api/v1/chat/completions", {',
+    '    method: "POST",',
+    '    body: JSON.stringify({',
+    '      model: "openai/gpt-4o-mini",',
+    '      messages: [],',
+    '    }),',
+    '  });',
+    '',
+    '  if (!response.ok) {',
+    '    throw new Error("Expected successful CommonJS response.");',
+    '  }',
+    '',
+    '  console.log("runtime-cjs-ok");',
+    '}',
+    '',
+    'main().catch((error) => {',
+    '  console.error(error);',
+    '  process.exitCode = 1;',
+    '});',
     '',
   ].join('\n');
 }
@@ -433,7 +533,16 @@ async function findTypeScriptCompiler(startDirectory: string): Promise<string> {
 }
 
 function parseNpmPackOutput(stdout: string): readonly NpmPackOutputItem[] {
-  const parsed = JSON.parse(stdout) as unknown;
+  const trimmed = stdout.trim();
+  const firstBracket = trimmed.indexOf('[');
+  const lastBracket = trimmed.lastIndexOf(']');
+
+  if (firstBracket === -1 || lastBracket === -1 || lastBracket < firstBracket) {
+    throw new Error('npm pack --json did not return a JSON array.');
+  }
+
+  const jsonText = trimmed.slice(firstBracket, lastBracket + 1);
+  const parsed = JSON.parse(jsonText) as unknown;
 
   if (!Array.isArray(parsed)) {
     throw new Error('npm pack --json did not return an array.');
@@ -497,6 +606,7 @@ async function runNpm(params: {
     ],
   });
 }
+
 async function findNpmCliPath(startDirectory: string): Promise<string> {
   const candidates = buildNpmCliPathCandidates(startDirectory);
 
@@ -576,6 +686,7 @@ function buildNpmCliPathCandidates(startDirectory: string): readonly string[] {
 
   return [...new Set(candidates.map((candidate) => path.resolve(candidate)))];
 }
+
 async function runNode(params: {
   readonly cwd: string;
   readonly args: readonly string[];
@@ -598,19 +709,22 @@ async function runCommand(params: {
       windowsHide: true,
       maxBuffer: 1024 * 1024 * 20,
       encoding: 'utf8',
-    }) as CommandResult;
+    });
 
-    if (result.stdout.trim().length > 0) {
-      process.stdout.write(result.stdout);
+    const stdout = result.stdout;
+    const stderr = result.stderr;
+
+    if (stdout.trim().length > 0) {
+      process.stdout.write(stdout);
     }
 
-    if (result.stderr.trim().length > 0) {
-      process.stderr.write(result.stderr);
+    if (stderr.trim().length > 0) {
+      process.stderr.write(stderr);
     }
 
     return {
-      stdout: result.stdout,
-      stderr: result.stderr,
+      stdout,
+      stderr,
     };
   } catch (error) {
     if (isExecError(error)) {
