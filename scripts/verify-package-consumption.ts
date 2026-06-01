@@ -61,29 +61,33 @@ async function main(): Promise<void> {
       });
     });
 
-    tarballPath = await runStep('Packing package', async () => {
-      const result = await runNpm({
-        cwd: packageRoot,
-        args: ['pack', '--json'],
-      });
+await runStep('Creating temp consumer project', async () => {
+  await createConsumerProject(consumerRoot);
+});
 
-      const packed = parseNpmPackOutput(result.stdout);
-      const first = packed[0];
+tarballPath = await runStep('Packing package', async () => {
+  const result = await runNpm({
+    cwd: packageRoot,
+    args: ['pack', '--json', '--pack-destination', consumerRoot],
+  });
 
-      if (!first) {
-        throw new Error('npm pack did not return any package output item.');
-      }
+  const packed = parseNpmPackOutput(result.stdout);
+  const first = packed[0];
 
-      const resolvedTarballPath = path.resolve(packageRoot, first.filename);
+  if (!first) {
+    throw new Error('npm pack did not return any package output item.');
+  }
 
-      logInfo('Package tarball: ' + resolvedTarballPath);
+  const resolvedTarballPath = resolvePackedTarballPath({
+    packageRoot,
+    packDestination: consumerRoot,
+    filename: first.filename,
+  });
 
-      return resolvedTarballPath;
-    });
+  logInfo('Package tarball: ' + resolvedTarballPath);
 
-    await runStep('Creating temp consumer project', async () => {
-      await createConsumerProject(consumerRoot);
-    });
+  return resolvedTarballPath;
+});
 
     await runStep('Installing tarball in temp consumer project', async () => {
       if (tarballPath === null) {
@@ -530,6 +534,35 @@ async function findTypeScriptCompiler(startDirectory: string): Promise<string> {
       'Install typescript in the workspace or package before running verify:consumer.',
     ].join(' '),
   );
+}
+
+function resolvePackedTarballPath(params: {
+  readonly packageRoot: string;
+  readonly packDestination: string;
+  readonly filename: string;
+}): string {
+  if (path.isAbsolute(params.filename)) {
+    return params.filename;
+  }
+
+  const fromPackDestination = path.resolve(
+    params.packDestination,
+    params.filename,
+  );
+
+  const fromPackageRoot = path.resolve(
+    params.packageRoot,
+    params.filename,
+  );
+
+  /*
+   * npm normally writes the tarball inside --pack-destination, but older npm
+   * versions may report only a relative filename. Prefer the explicit temp
+   * destination because that is the path we install from.
+   */
+  return fromPackDestination.includes(path.resolve(params.packDestination))
+    ? fromPackDestination
+    : fromPackageRoot;
 }
 
 function parseNpmPackOutput(stdout: string): readonly NpmPackOutputItem[] {
