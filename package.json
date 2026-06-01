@@ -59,13 +59,12 @@
     "prepublishOnly": "npm run clean && npm run check && npm run test && npm run build",
     "verify:consumer": "tsx scripts/verify-package-consumption.ts"
   },
-  "dependencies": {},
   "devDependencies": {
-    "@types/node": "^22.19.18",
+    "@types/node": "^22.19.19",
     "tsup": "^8.0.0",
+    "tsx": "^4.19.2",
     "typescript": "^5.0.0",
-    "vitest": "^4.1.5",
-    "tsx": "^4.19.2"
+    "vitest": "^4.1.5"
   },
   "engines": {
     "node": ">=20"
